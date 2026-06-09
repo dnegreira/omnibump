@@ -531,6 +531,19 @@ func buildDependencyPatterns(groupID, artifactID string) []dependencyPattern {
 			),
 			versionGroup: versionGroupOne,
 		},
+		// Pattern 4: Gradle resolution strategy - details.useVersion inside eachDependency block.
+		// Handles both inline-and format and nested group-check format:
+		//   if (details.requested.group == 'G' && details.requested.name == 'A') { details.useVersion 'V' }
+		//   if (details.requested.group == 'G') { if (details.requested.name == 'A') { details.useVersion 'V' } }
+		// The [\s\S]{0,N}? (non-greedy) windows prevent matching across unrelated blocks.
+		{
+			name: "resolution-strategy",
+			regex: fmt.Sprintf(
+				`(?s)details\.requested\.group\s*==\s*["']%s["'][\s\S]{0,300}?details\.requested\.name\s*==\s*["']%s["'][\s\S]{0,200}?details\.useVersion\s*["']([^"'\n]+)["']`,
+				g, a,
+			),
+			versionGroup: versionGroupOne,
+		},
 	}
 }
 

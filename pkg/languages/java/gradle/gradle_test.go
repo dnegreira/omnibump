@@ -381,12 +381,12 @@ func TestParseDependencyName(t *testing.T) {
 func TestBuildDependencyPatterns(t *testing.T) {
 	patterns := buildDependencyPatterns("org.example", "my-lib")
 
-	if len(patterns) != 3 {
-		t.Fatalf("buildDependencyPatterns() returned %d patterns, want 3", len(patterns))
+	if len(patterns) != 4 {
+		t.Fatalf("buildDependencyPatterns() returned %d patterns, want 4", len(patterns))
 	}
 
 	// Verify pattern names
-	expectedNames := []string{"string-notation", "library-function", "map-notation"}
+	expectedNames := []string{"string-notation", "library-function", "map-notation", "resolution-strategy"}
 	for i, name := range expectedNames {
 		if patterns[i].name != name {
 			t.Errorf("pattern[%d].name = %q, want %q", i, patterns[i].name, name)
@@ -862,6 +862,97 @@ func TestGradle_Update_MapNotation(t *testing.T) {
 
 	if !strings.Contains(updatedStr, `version = "4.13.3"`) {
 		t.Errorf("junit version not updated.\nContent:\n%s", updatedStr)
+	}
+}
+
+func TestGradle_Update_ResolutionStrategyAndFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	buildFile := filepath.Join(tmpDir, "build.gradle")
+	buildContent := `subprojects {
+  configurations.all {
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+      if (details.requested.group == 'com.signalfx.public' &&
+          details.requested.name == 'signalfx-java') {
+        details.useVersion '1.0.49'
+      }
+      if (details.requested.group == 'org.apache.commons' &&
+          details.requested.name == 'commons-lang3') {
+        details.useVersion '3.12.0'
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(buildFile, []byte(buildContent), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	g := &Gradle{}
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Dependencies: []languages.Dependency{
+			{Name: "com.signalfx.public:signalfx-java", Version: "1.0.50"},
+			{Name: "org.apache.commons:commons-lang3", Version: "3.18.0"},
+		},
+	}
+	if err := g.Update(context.Background(), cfg); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	updated, _ := os.ReadFile(buildFile)
+	s := string(updated)
+	if !strings.Contains(s, `details.useVersion '1.0.50'`) {
+		t.Errorf("signalfx-java not updated:\n%s", s)
+	}
+	if !strings.Contains(s, `details.useVersion '3.18.0'`) {
+		t.Errorf("commons-lang3 not updated:\n%s", s)
+	}
+}
+
+func TestGradle_Update_ResolutionStrategyNestedGroupFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	buildFile := filepath.Join(tmpDir, "build.gradle")
+	buildContent := `subprojects {
+  configurations.all {
+    resolutionStrategy.eachDependency { DependencyResolveDetails details ->
+      if (details.requested.group == 'io.netty') {
+        if (details.requested.name == 'netty-common' ||
+            details.requested.name == 'netty-handler') {
+          details.useVersion '4.1.100.Final'
+        }
+        if (details.requested.name == 'netty-codec-http') {
+          details.useVersion '4.1.100.Final'
+        }
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(buildFile, []byte(buildContent), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	g := &Gradle{}
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Dependencies: []languages.Dependency{
+			{Name: "io.netty:netty-common", Version: "4.1.118.Final"},
+			{Name: "io.netty:netty-handler", Version: "4.1.118.Final"},
+			{Name: "io.netty:netty-codec-http", Version: "4.1.133.Final"},
+		},
+	}
+	if err := g.Update(context.Background(), cfg); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	updated, _ := os.ReadFile(buildFile)
+	s := string(updated)
+	if !strings.Contains(s, `details.useVersion '4.1.118.Final'`) {
+		t.Errorf("netty-common/handler not updated:\n%s", s)
+	}
+	if !strings.Contains(s, `details.useVersion '4.1.133.Final'`) {
+		t.Errorf("netty-codec-http not updated:\n%s", s)
+	}
+	if strings.Contains(s, `details.useVersion '4.1.100.Final'`) {
+		t.Errorf("old version still present:\n%s", s)
 	}
 }
 
