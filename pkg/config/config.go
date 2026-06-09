@@ -327,6 +327,11 @@ func (c *Config) ToUpdateConfig() *languages.UpdateConfig {
 
 		if pkg.GroupID != "" {
 			dep.Metadata["groupId"] = pkg.GroupID
+			// Construct dep.Name as "groupId:artifactId" so build-tool
+			// implementations (Gradle, Maven fallback) can use it directly.
+			if pkg.ArtifactID != "" && dep.Name == "" {
+				dep.Name = pkg.GroupID + ":" + pkg.ArtifactID
+			}
 		}
 		if pkg.ArtifactID != "" {
 			dep.Metadata["artifactId"] = pkg.ArtifactID
