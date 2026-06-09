@@ -71,6 +71,12 @@ var gradleManifestFiles = map[string]bool{
 	"settings.gradle.kts": true,
 	"settings.gradle":     true,
 	"libs.versions.toml":  true,
+	// Init-script convention used for CVE override files stored alongside
+	// the package definition and deployed to ${HOME}/.gradle/init.d/ at
+	// build time. Any file named *.init.gradle or cve-overrides.gradle is
+	// picked up automatically without requiring explicit --manifest flags.
+	"cve-overrides.gradle": true,
+	"init.gradle":          true,
 }
 
 // skipDirs lists directories to skip when walking the file tree.
@@ -342,12 +348,14 @@ func updateBuildFile(ctx context.Context, path string, cfg *languages.UpdateConf
 
 	// Determine file type and route to appropriate handler
 	filename := filepath.Base(path)
-	switch filename {
-	case "libs.versions.toml":
+	switch {
+	case filename == "libs.versions.toml":
 		return updateVersionCatalogToml(ctx, path, cfg)
-	case "settings.gradle", "settings.gradle.kts":
+	case filename == "settings.gradle" || filename == "settings.gradle.kts":
 		return updateSettingsGradle(ctx, path, cfg)
-	case "build.gradle", "build.gradle.kts":
+	case strings.HasSuffix(filename, ".gradle") || strings.HasSuffix(filename, ".gradle.kts"):
+		// Handles build.gradle, build.gradle.kts, cve-overrides.gradle,
+		// init.gradle, and any other .gradle files.
 		return updateBuildGradle(ctx, path, cfg)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnknownFileType, filename)
@@ -531,7 +539,15 @@ func buildDependencyPatterns(groupID, artifactID string) []dependencyPattern {
 			),
 			versionGroup: versionGroupOne,
 		},
-		// Pattern 4: Gradle resolution strategy - details.useVersion inside eachDependency block.
+		// Pattern 4: resolutionStrategy.force() - the canonical single-line format for CVE overrides:
+		//   force 'group:artifact:version'   or   force("group:artifact:version")
+		// Preferred over eachDependency for new packages: simpler, one line per dep, easy to add/remove.
+		{
+			name:         "force",
+			regex:        fmt.Sprintf(`force\s*["']%s:%s:([^"'\n]+)["']`, g, a),
+			versionGroup: versionGroupOne,
+		},
+		// Pattern 5: Gradle resolution strategy - details.useVersion inside eachDependency block.
 		// Handles both inline-and format and nested group-check format:
 		//   if (details.requested.group == 'G' && details.requested.name == 'A') { details.useVersion 'V' }
 		//   if (details.requested.group == 'G') { if (details.requested.name == 'A') { details.useVersion 'V' } }

@@ -381,12 +381,12 @@ func TestParseDependencyName(t *testing.T) {
 func TestBuildDependencyPatterns(t *testing.T) {
 	patterns := buildDependencyPatterns("org.example", "my-lib")
 
-	if len(patterns) != 4 {
-		t.Fatalf("buildDependencyPatterns() returned %d patterns, want 4", len(patterns))
+	if len(patterns) != 5 {
+		t.Fatalf("buildDependencyPatterns() returned %d patterns, want 5", len(patterns))
 	}
 
 	// Verify pattern names
-	expectedNames := []string{"string-notation", "library-function", "map-notation", "resolution-strategy"}
+	expectedNames := []string{"string-notation", "library-function", "map-notation", "force", "resolution-strategy"}
 	for i, name := range expectedNames {
 		if patterns[i].name != name {
 			t.Errorf("pattern[%d].name = %q, want %q", i, patterns[i].name, name)
@@ -862,6 +862,53 @@ func TestGradle_Update_MapNotation(t *testing.T) {
 
 	if !strings.Contains(updatedStr, `version = "4.13.3"`) {
 		t.Errorf("junit version not updated.\nContent:\n%s", updatedStr)
+	}
+}
+
+func TestGradle_Update_ResolutionStrategyForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	buildFile := filepath.Join(tmpDir, "cve-overrides.gradle")
+	content := `// CVE overrides — deployed to ${HOME}/.gradle/init.d/ at build time
+allprojects {
+    configurations.all {
+        resolutionStrategy {
+            force 'io.netty:netty-codec:4.1.100.Final'
+            force 'io.netty:netty-codec-http:4.1.100.Final'
+            force 'org.apache.commons:commons-lang3:3.12.0'
+        }
+    }
+}
+`
+	if err := os.WriteFile(buildFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	g := &Gradle{}
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Dependencies: []languages.Dependency{
+			{Name: "io.netty:netty-codec", Version: "4.1.133.Final"},
+			{Name: "io.netty:netty-codec-http", Version: "4.1.133.Final"},
+			{Name: "org.apache.commons:commons-lang3", Version: "3.18.0"},
+		},
+	}
+	if err := g.Update(context.Background(), cfg); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	updated, _ := os.ReadFile(buildFile)
+	s := string(updated)
+	if !strings.Contains(s, `force 'io.netty:netty-codec:4.1.133.Final'`) {
+		t.Errorf("netty-codec not updated:\n%s", s)
+	}
+	if !strings.Contains(s, `force 'io.netty:netty-codec-http:4.1.133.Final'`) {
+		t.Errorf("netty-codec-http not updated:\n%s", s)
+	}
+	if !strings.Contains(s, `force 'org.apache.commons:commons-lang3:3.18.0'`) {
+		t.Errorf("commons-lang3 not updated:\n%s", s)
+	}
+	if strings.Contains(s, `4.1.100.Final`) {
+		t.Errorf("old version still present:\n%s", s)
 	}
 }
 
