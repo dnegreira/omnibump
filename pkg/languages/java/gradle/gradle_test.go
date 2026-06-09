@@ -7,6 +7,7 @@ package gradle
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/omnibump/pkg/analyzer"
 	"github.com/chainguard-dev/omnibump/pkg/languages"
+	"github.com/chainguard-dev/omnibump/pkg/pathutil"
 )
 
 func TestGradle_Name(t *testing.T) {
@@ -1585,6 +1587,209 @@ func TestFindBuildFiles_SkipsSymlinks(t *testing.T) {
 	}
 }
 
+func TestFindGradleRoot_ReturnsStartIfNoParentSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// No settings.gradle anywhere; should return tmpDir itself
+	got := findGradleRoot(tmpDir)
+	if got != tmpDir {
+		t.Errorf("findGradleRoot() = %q, want %q", got, tmpDir)
+	}
+}
+
+func TestFindGradleRoot_StopsAtHighestSettings(t *testing.T) {
+	// Layout:
+	//   root/              ← has settings.gradle (true root)
+	//     app/             ← has settings.gradle (subproject, but still a root by file presence)
+	//       submodule/     ← no settings.gradle
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	subDir := filepath.Join(appDir, "submodule")
+	for _, d := range []string{appDir, subDir} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	// settings.gradle in root and app
+	for _, dir := range []string{root, appDir} {
+		if err := os.WriteFile(filepath.Join(dir, "settings.gradle"), []byte(""), 0o600); err != nil {
+			t.Fatalf("write settings: %v", err)
+		}
+	}
+
+	got := findGradleRoot(subDir)
+	if got != root {
+		t.Errorf("findGradleRoot(%q) = %q, want %q", subDir, got, root)
+	}
+}
+
+func TestFindGradleRoot_SubmodulePointsToRoot(t *testing.T) {
+	// Layout:
+	//   root/              ← has settings.gradle
+	//     app/             ← no settings.gradle (plain submodule)
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	if err := os.MkdirAll(appDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings.gradle"), []byte(""), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	got := findGradleRoot(appDir)
+	if got != root {
+		t.Errorf("findGradleRoot(%q) = %q, want %q", appDir, got, root)
+	}
+}
+
+func TestAnalyze_FindsRootCatalogFromSubmodule(t *testing.T) {
+	// Layout:
+	//   root/
+	//     settings.gradle
+	//     gradle/libs.versions.toml  ← defines netty-all
+	//     app/
+	//       build.gradle              ← uses catalog ref
+	root := t.TempDir()
+	appDir := filepath.Join(root, "app")
+	gradleDir := filepath.Join(root, "gradle")
+	for _, d := range []string{appDir, gradleDir} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "settings.gradle"), []byte(`include(":app")`), 0o600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	tomlPath := filepath.Join(gradleDir, "libs.versions.toml")
+	tomlContent := `[versions]
+netty-all = "4.1.100.Final"
+
+[libraries]
+netty-all = { module = "io.netty:netty-all", version.ref = "netty-all" }
+`
+	if err := os.WriteFile(tomlPath, []byte(tomlContent), 0o600); err != nil {
+		t.Fatalf("write toml: %v", err)
+	}
+
+	buildPath := filepath.Join(appDir, "build.gradle")
+	if err := os.WriteFile(buildPath, []byte(`dependencies {
+    implementation(libs.netty.all)
+}`), 0o600); err != nil {
+		t.Fatalf("write build: %v", err)
+	}
+
+	a := &GradleAnalyzer{}
+	result, err := a.Analyze(context.Background(), appDir)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+
+	// The TOML catalog key should be visible even though it's outside appDir
+	if result.Properties["netty-all"] != "4.1.100.Final" {
+		t.Errorf("expected netty-all = 4.1.100.Final in Properties, got %q", result.Properties["netty-all"])
+	}
+	if result.PropertySources["netty-all"] != tomlPath {
+		t.Errorf("PropertySources[netty-all] = %q, want %q", result.PropertySources["netty-all"], tomlPath)
+	}
+}
+
+func TestValidatePathWithinRoot_SafePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"root itself", tmpDir},
+		{"direct child", filepath.Join(tmpDir, "build.gradle")},
+		{"nested child", filepath.Join(tmpDir, "subproject", "build.gradle")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create path so EvalSymlinks can resolve it (skip if it's a directory that already exists)
+			if err := os.MkdirAll(filepath.Dir(tt.path), 0o750); err != nil {
+				t.Fatalf("setup mkdir: %v", err)
+			}
+			if info, err := os.Stat(tt.path); err != nil || !info.IsDir() {
+				f, err := os.Create(tt.path)
+				if err != nil {
+					t.Fatalf("setup create: %v", err)
+				}
+				f.Close()
+			}
+
+			if err := pathutil.ValidatePathWithinRoot(tmpDir, tt.path); err != nil {
+				t.Errorf("pathutil.ValidatePathWithinRoot() unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatePathWithinRoot_EscapePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	parentDir := filepath.Dir(tmpDir)
+
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"parent directory", parentDir},
+		{"sibling directory", filepath.Join(parentDir, "sibling")},
+		{"traversal via dotdot", filepath.Join(tmpDir, "..", "escape")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := pathutil.ValidatePathWithinRoot(tmpDir, tt.path)
+			if err == nil {
+				t.Errorf("pathutil.ValidatePathWithinRoot() expected error for escape path %s, got nil", tt.path)
+			}
+		})
+	}
+}
+
+func TestProcessFileUpdate_RejectsEscapePath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a real build.gradle inside the root
+	buildFile := filepath.Join(tmpDir, "build.gradle")
+	if err := os.WriteFile(buildFile, []byte(`dependencies {}`), 0o600); err != nil {
+		t.Fatalf("failed to write build file: %v", err)
+	}
+
+	// Create a file outside the root
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "build.gradle")
+	if err := os.WriteFile(outsideFile, []byte(`dependencies {}`), 0o600); err != nil {
+		t.Fatalf("failed to write outside file: %v", err)
+	}
+
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Dependencies: []languages.Dependency{
+			{Name: "io.netty:netty-all", Version: "4.1.101.Final"},
+		},
+	}
+
+	// Directly call processFileUpdate with a path outside root — should be rejected
+	err := processFileUpdate(context.Background(), outsideFile, cfg, updateBuildGradleContent)
+	if err == nil {
+		t.Fatal("processFileUpdate() should reject path outside root, got nil")
+	}
+	if !errors.Is(err, pathutil.ErrUnsafePath) {
+		t.Errorf("expected pathutil.ErrUnsafePath, got: %v", err)
+	}
+
+	// Verify the outside file was not modified
+	content, _ := os.ReadFile(outsideFile)
+	if string(content) != `dependencies {}` {
+		t.Error("file outside root should not be modified")
+	}
+}
+
 // TestFindVersionKeyForArtifact_EdgeCases tests edge cases for version catalog key lookup.
 func TestFindVersionKeyForArtifact_EdgeCases(t *testing.T) {
 	tests := []struct {
@@ -1781,5 +1986,165 @@ func TestParseLibraryVersion(t *testing.T) {
 				t.Errorf("parseLibraryVersion() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGradle_Update_Properties_TomlCatalog(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gradleDir := filepath.Join(tmpDir, "gradle")
+	if err := os.MkdirAll(gradleDir, 0o750); err != nil {
+		t.Fatalf("failed to create gradle dir: %v", err)
+	}
+
+	tomlFile := filepath.Join(gradleDir, "libs.versions.toml")
+	tomlContent := `[versions]
+netty-all = "4.1.100.Final"
+commons-lang3 = "3.12.0"
+
+[libraries]
+netty-all = { module = "io.netty:netty-all", version.ref = "netty-all" }
+commons-lang3 = { module = "org.apache.commons:commons-lang3", version.ref = "commons-lang3" }
+`
+	if err := os.WriteFile(tomlFile, []byte(tomlContent), 0o600); err != nil {
+		t.Fatalf("failed to write libs.versions.toml: %v", err)
+	}
+
+	g := &Gradle{}
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Properties: map[string]string{
+			"netty-all":    "4.1.101.Final",
+			"commons-lang3": "3.18.0",
+		},
+	}
+
+	if err := g.Update(context.Background(), cfg); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	updated, err := os.ReadFile(tomlFile)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+	updatedStr := string(updated)
+
+	if !strings.Contains(updatedStr, `netty-all = "4.1.101.Final"`) {
+		t.Errorf("netty-all not updated via properties.\nContent:\n%s", updatedStr)
+	}
+	if !strings.Contains(updatedStr, `commons-lang3 = "3.18.0"`) {
+		t.Errorf("commons-lang3 not updated via properties.\nContent:\n%s", updatedStr)
+	}
+	if strings.Contains(updatedStr, `netty-all = "4.1.100.Final"`) {
+		t.Errorf("old netty-all version still present.\nContent:\n%s", updatedStr)
+	}
+}
+
+func TestGradle_Update_Properties_SettingsGradle(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	settingsFile := filepath.Join(tmpDir, "settings.gradle")
+	settingsContent := `rootProject.name = 'test-project'
+
+dependencyResolutionManagement {
+    versionCatalogs {
+        libs {
+            version("netty-all", "4.1.100.Final")
+            version("commons-lang3", "3.12.0")
+        }
+    }
+}
+`
+	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0o600); err != nil {
+		t.Fatalf("failed to write settings.gradle: %v", err)
+	}
+
+	g := &Gradle{}
+	cfg := &languages.UpdateConfig{
+		RootDir: tmpDir,
+		Properties: map[string]string{
+			"netty-all":    "4.1.101.Final",
+			"commons-lang3": "3.18.0",
+		},
+	}
+
+	if err := g.Update(context.Background(), cfg); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	updated, err := os.ReadFile(settingsFile)
+	if err != nil {
+		t.Fatalf("failed to read updated file: %v", err)
+	}
+	updatedStr := string(updated)
+
+	if !strings.Contains(updatedStr, `version("netty-all", "4.1.101.Final")`) {
+		t.Errorf("netty-all not updated via properties.\nContent:\n%s", updatedStr)
+	}
+	if !strings.Contains(updatedStr, `version("commons-lang3", "3.18.0")`) {
+		t.Errorf("commons-lang3 not updated via properties.\nContent:\n%s", updatedStr)
+	}
+	if strings.Contains(updatedStr, `version("netty-all", "4.1.100.Final")`) {
+		t.Errorf("old netty-all version still present.\nContent:\n%s", updatedStr)
+	}
+}
+
+func TestGradleAnalyzer_Analyze_PropertySources(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create TOML catalog
+	gradleDir := filepath.Join(tmpDir, "gradle")
+	if err := os.MkdirAll(gradleDir, 0o750); err != nil {
+		t.Fatalf("failed to create gradle dir: %v", err)
+	}
+	tomlFile := filepath.Join(gradleDir, "libs.versions.toml")
+	tomlContent := `[versions]
+netty-all = "4.1.100.Final"
+
+[libraries]
+netty-all = { module = "io.netty:netty-all", version.ref = "netty-all" }
+`
+	if err := os.WriteFile(tomlFile, []byte(tomlContent), 0o600); err != nil {
+		t.Fatalf("failed to write libs.versions.toml: %v", err)
+	}
+
+	// Create settings.gradle with an inline catalog key
+	settingsFile := filepath.Join(tmpDir, "settings.gradle")
+	settingsContent := `dependencyResolutionManagement {
+    versionCatalogs {
+        libs {
+            version("commons-lang3", "3.12.0")
+        }
+    }
+}
+`
+	if err := os.WriteFile(settingsFile, []byte(settingsContent), 0o600); err != nil {
+		t.Fatalf("failed to write settings.gradle: %v", err)
+	}
+
+	// Create a minimal build.gradle so findBuildFiles has something to return
+	buildFile := filepath.Join(tmpDir, "build.gradle")
+	if err := os.WriteFile(buildFile, []byte("dependencies {}"), 0o600); err != nil {
+		t.Fatalf("failed to write build.gradle: %v", err)
+	}
+
+	a := &GradleAnalyzer{}
+	result, err := a.Analyze(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+
+	if result.PropertySources == nil {
+		t.Fatal("PropertySources should be initialized, got nil")
+	}
+
+	// TOML key should point to the TOML file
+	if src := result.PropertySources["netty-all"]; src != tomlFile {
+		t.Errorf("PropertySources[netty-all] = %q, want %q", src, tomlFile)
+	}
+
+	// Inline settings key should point to settings.gradle
+	if src := result.PropertySources["commons-lang3"]; src != settingsFile {
+		t.Errorf("PropertySources[commons-lang3] = %q, want %q", src, settingsFile)
 	}
 }

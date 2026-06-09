@@ -16,6 +16,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/omnibump/pkg/analyzer"
+	"github.com/chainguard-dev/omnibump/pkg/pathutil"
 )
 
 // GradleAnalyzer implements dependency analysis for Gradle projects.
@@ -59,26 +60,40 @@ func (ga *GradleAnalyzer) Analyze(ctx context.Context, projectPath string) (*ana
 
 	log.Debugf("Analyzing Gradle project: %s", absPath)
 
+	// Walk up to find the true Gradle project root so that version catalog files
+	// in a parent directory are visible when absPath is a submodule.
+	// This mirrors Maven's findProjectRoot which walks up while pom.xml exists.
+	gradleRoot := findGradleRoot(absPath)
+	if gradleRoot != absPath {
+		log.Infof("Found Gradle project root at %s (above requested path %s)", gradleRoot, absPath)
+	}
+
 	result := &analyzer.AnalysisResult{
-		Language:      "java",
-		Dependencies:  make(map[string]*analyzer.DependencyInfo),
-		Properties:    make(map[string]string), // Version catalog keys
-		PropertyUsage: make(map[string]int),    // Catalog key usage count
+		Language:        "java",
+		Dependencies:    make(map[string]*analyzer.DependencyInfo),
+		Properties:      make(map[string]string), // Version catalog keys
+		PropertySources: make(map[string]string), // Catalog key -> defining file
+		PropertyUsage:   make(map[string]int),    // Catalog key usage count
 		Metadata: map[string]any{
 			"build_tool": "gradle",
 		},
 	}
 
-	// Find all Gradle manifest files
-	files, err := findBuildFiles(absPath)
+	// Find all Gradle manifest files, starting from the project root so that
+	// sibling modules and root-level version catalogs are included.
+	files, err := findBuildFiles(gradleRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find build files: %w", err)
 	}
 
 	log.Infof("Found %d Gradle file(s) to analyze", len(files))
 
-	// Parse version catalogs first (TOML and inline)
+	// Parse version catalogs first (TOML and inline), bounded by gradleRoot.
 	for _, file := range files {
+		if err := pathutil.ValidatePathWithinRoot(gradleRoot, file); err != nil {
+			log.Warnf("Skipping %s: %v", file, err)
+			continue
+		}
 		filename := filepath.Base(file)
 		switch filename {
 		case "libs.versions.toml":
@@ -92,8 +107,12 @@ func (ga *GradleAnalyzer) Analyze(ctx context.Context, projectPath string) (*ana
 		}
 	}
 
-	// Parse build files for dependencies
+	// Parse build files for dependencies, bounded by gradleRoot.
 	for _, file := range files {
+		if err := pathutil.ValidatePathWithinRoot(gradleRoot, file); err != nil {
+			log.Warnf("Skipping %s: %v", file, err)
+			continue
+		}
 		filename := filepath.Base(file)
 		if filename == "build.gradle" || filename == "build.gradle.kts" {
 			if err := analyzeBuildGradle(ctx, file, result); err != nil {
@@ -171,7 +190,7 @@ func analyzeVersionCatalogToml(ctx context.Context, path string, result *analyze
 		return fmt.Errorf("failed to parse TOML: %w", err)
 	}
 
-	extractVersionCatalogKeys(catalog, result, log)
+	extractVersionCatalogKeys(catalog, path, result, log)
 	extractLibraryDefinitions(catalog, result, log)
 
 	return nil
@@ -217,7 +236,7 @@ func handleDirectUpdate(log *clog.Logger, depKey string, dep analyzer.Dependency
 }
 
 // extractVersionCatalogKeys extracts version keys from TOML catalog.
-func extractVersionCatalogKeys(catalog map[string]any, result *analyzer.AnalysisResult, log *clog.Logger) {
+func extractVersionCatalogKeys(catalog map[string]any, sourcePath string, result *analyzer.AnalysisResult, log *clog.Logger) {
 	versions, ok := catalog["versions"].(map[string]any)
 	if !ok {
 		return
@@ -226,6 +245,7 @@ func extractVersionCatalogKeys(catalog map[string]any, result *analyzer.Analysis
 	for key, value := range versions {
 		if version, ok := value.(string); ok {
 			result.Properties[key] = version
+			result.PropertySources[key] = sourcePath
 			log.Debugf("Found version catalog key: %s = %s", key, version)
 		}
 	}
@@ -312,6 +332,7 @@ func analyzeSettingsGradle(ctx context.Context, path string, result *analyzer.An
 			key := match[1]
 			version := match[2]
 			result.Properties[key] = version
+			result.PropertySources[key] = path
 			log.Debugf("Found inline version catalog key: %s = %s", key, version)
 		}
 	}

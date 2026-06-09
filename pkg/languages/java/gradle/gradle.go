@@ -20,6 +20,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/omnibump/pkg/analyzer"
 	"github.com/chainguard-dev/omnibump/pkg/languages"
+	"github.com/chainguard-dev/omnibump/pkg/pathutil"
 )
 
 // Gradle implements the BuildTool interface for Gradle projects.
@@ -143,7 +144,8 @@ func (g *Gradle) Update(ctx context.Context, cfg *languages.UpdateConfig) error 
 		}
 	}
 
-	// Find build files
+	// Find build files within cfg.RootDir. cfg.RootDir is the hard boundary for
+	// all reads and writes, matching Maven's use of cfg.RootDir as the project root.
 	buildFiles, err := findBuildFiles(cfg.RootDir)
 	if err != nil {
 		return fmt.Errorf("failed to find build files: %w", err)
@@ -155,7 +157,6 @@ func (g *Gradle) Update(ctx context.Context, cfg *languages.UpdateConfig) error 
 
 	log.Infof("Found %d build file(s)", len(buildFiles))
 
-	// Update each build file
 	for _, buildFile := range buildFiles {
 		if err := updateBuildFile(ctx, buildFile, cfg); err != nil {
 			return fmt.Errorf("failed to update %s: %w", buildFile, err)
@@ -244,6 +245,39 @@ func validateDirectDependency(ctx context.Context, depKey, expectedVersion strin
 
 	log.Debugf("Verified %s = %s", depKey, depInfo.Version)
 	return ""
+}
+
+// hasSettingsFile reports whether dir contains a Gradle settings file.
+func hasSettingsFile(dir string) bool {
+	for _, name := range []string{"settings.gradle.kts", "settings.gradle"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// findGradleRoot walks up the directory tree to find the root of the Gradle
+// project — the highest ancestor directory that still contains a settings file.
+// Stops at the filesystem root or when a parent no longer has a settings file.
+// This mirrors Maven's findProjectRoot which walks up while pom.xml exists.
+func findGradleRoot(startDir string) string {
+	current := startDir
+	projectRoot := startDir
+
+	for {
+		parent := filepath.Dir(current)
+		if parent == current {
+			break // Reached filesystem root
+		}
+		if hasSettingsFile(parent) {
+			projectRoot = parent
+			current = parent
+		} else {
+			break
+		}
+	}
+	return projectRoot
 }
 
 // findBuildFiles finds all Gradle files that can contain dependency versions.
@@ -338,9 +372,16 @@ func replaceRegexMatches(content string, matches [][]int, versionGroupIdx int, n
 	return updated, changeCount
 }
 
+
 // processFileUpdate handles the common pattern of reading a file, updating it, and writing it back.
 func processFileUpdate(ctx context.Context, path string, cfg *languages.UpdateConfig, updater updateFileFunc) error {
 	log := clog.FromContext(ctx)
+
+	// Reject any path that resolves outside cfg.RootDir (symlink or traversal).
+	// This mirrors Maven's use of cfg.RootDir as the hard project boundary.
+	if err := pathutil.ValidatePathWithinRoot(cfg.RootDir, path); err != nil {
+		return err
+	}
 
 	// Check file size before reading to prevent resource exhaustion.
 	fileInfo, err := os.Stat(path)
@@ -537,6 +578,21 @@ func updateVersionCatalogTomlContent(ctx context.Context, content string, cfg *l
 		}
 	}
 
+	// Update version catalog keys directly from cfg.Properties.
+	// For Gradle, properties map to version catalog version aliases in [versions].
+	for key, version := range cfg.Properties {
+		if _, exists := versions[key]; !exists {
+			log.Debugf("Version catalog key %s not found in TOML", key)
+			continue
+		}
+		newContent, changed := updateTomlVersionLine(updated, key, version)
+		if changed {
+			updated = newContent
+			changeCount++
+			log.Infof("Updated catalog key %s to %s", key, version)
+		}
+	}
+
 	return updated, changeCount, nil
 }
 
@@ -614,6 +670,24 @@ func updateSettingsGradleContent(ctx context.Context, content string, cfg *langu
 
 			if count > 0 {
 				log.Infof("Updated %d occurrence(s) of %s to version %s", count, artifactID, dep.Version)
+			}
+		}
+	}
+
+	// Update version catalog keys directly from cfg.Properties.
+	// For Gradle, properties map to version catalog version aliases in version() declarations.
+	for key, version := range cfg.Properties {
+		pattern := regexp.MustCompile(fmt.Sprintf(
+			`version\s*\(\s*["']%s["']\s*,\s*["']([^"']+)["']\s*\)`,
+			regexp.QuoteMeta(key),
+		))
+		matches := pattern.FindAllStringSubmatchIndex(updated, -1)
+		if len(matches) > 0 {
+			var count int
+			updated, count = replaceRegexMatches(updated, matches, versionGroupOne, version)
+			changeCount += count
+			if count > 0 {
+				log.Infof("Updated catalog key %s to version %s", key, version)
 			}
 		}
 	}
