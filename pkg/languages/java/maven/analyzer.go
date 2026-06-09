@@ -17,7 +17,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/gopom"
 	"github.com/chainguard-dev/omnibump/pkg/analyzer"
-	"github.com/chainguard-dev/omnibump/pkg/utils"
+	"github.com/chainguard-dev/omnibump/pkg/pathutil"
 )
 
 // MavenAnalyzer implements the Analyzer interface for Maven projects.
@@ -382,7 +382,7 @@ func findProjectRoot(startDir, rootDir string) string {
 		}
 
 		// Stop climbing if the parent escapes the project root boundary.
-		if err := utils.ValidatePathWithinRoot(rootDir, parent); err != nil {
+		if err := pathutil.ValidatePathWithinRoot(rootDir, parent); err != nil {
 			break
 		}
 

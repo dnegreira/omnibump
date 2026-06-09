@@ -16,7 +16,7 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/gopom"
-	"github.com/chainguard-dev/omnibump/pkg/utils"
+	"github.com/chainguard-dev/omnibump/pkg/pathutil"
 	"github.com/ghodss/yaml"
 )
 
@@ -38,8 +38,8 @@ var (
 	ErrPropertyNotFound = errors.New("property not found")
 
 	// ErrUnsafePomPath is returned when an update would write outside the
-	// configured Maven project root. It is an alias for utils.ErrUnsafePath.
-	ErrUnsafePomPath = utils.ErrUnsafePath
+	// configured Maven project root. It is an alias for pathutil.ErrUnsafePath.
+	ErrUnsafePomPath = pathutil.ErrUnsafePath
 
 	// ErrVersionConflict is returned when two updates try to set different
 	// versions for the same dependency or property-backed dependency set.
@@ -384,7 +384,7 @@ func resolvePropertyPomPath(ctx context.Context, pomPath, property, rootDir stri
 		}
 
 		// Stop traversal if the next parent escapes the project root boundary.
-		if err := utils.ValidatePathWithinRoot(rootDir, parentPath); err != nil {
+		if err := pathutil.ValidatePathWithinRoot(rootDir, parentPath); err != nil {
 			boundaryErr = err
 			break
 		}
