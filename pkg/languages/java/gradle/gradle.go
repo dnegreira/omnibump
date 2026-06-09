@@ -287,20 +287,32 @@ func findGradleRoot(startDir string) string {
 // - settings.gradle[.kts] - Inline version catalogs
 // - gradle/libs.versions.toml - TOML version catalogs.
 func findBuildFiles(root string) ([]string, error) {
+	// Resolve to absolute path so the walk root's d.Name() is a real directory
+	// name rather than "." or "..". Without this, passing root="." causes
+	// WalkDir to visit the root with d.Name()=".", which our hidden-directory
+	// guard (name[0]=='.') would immediately skip — finding nothing.
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve root dir %s: %w", root, err)
+	}
+
 	var files []string
 
 	// Walk directory tree looking for build files
 	// Use WalkDir instead of Walk - it doesn't follow symlinks and provides type info directly
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Skip hidden directories and common non-build directories
+		// Skip hidden directories and common non-build directories.
+		// Exclude the root itself from the check so "." never matches.
 		if d.IsDir() {
-			name := d.Name()
-			if name[0] == '.' || skipDirs[name] {
-				return filepath.SkipDir
+			if path != absRoot {
+				name := d.Name()
+				if name[0] == '.' || skipDirs[name] {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
