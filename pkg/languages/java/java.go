@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/omnibump/pkg/languages"
@@ -138,9 +140,23 @@ func resolveBuildTool(ctx context.Context, cfg *languages.UpdateConfig) (BuildTo
 }
 
 // detectBuildTool detects which Java build tool is present in the directory.
-// Returns the first build tool that reports a positive detection.
+//
+// Root-level manifests win over recursive detection: a Gradle project that
+// vendors a pom.xml somewhere in its tree (e.g. Kafka's streams quickstart
+// archetype) must resolve to Gradle, and a Maven project with a stray Gradle
+// script in a subdirectory must resolve to Maven. Only when no tool has a
+// manifest at the project root does the deeper per-tool detection decide.
 func detectBuildTool(ctx context.Context, dir string) BuildTool {
 	log := clog.FromContext(ctx)
+
+	for _, tool := range registeredBuildTools {
+		for _, manifest := range tool.GetManifestFiles() {
+			if _, err := os.Stat(filepath.Join(dir, manifest)); err == nil {
+				log.Debugf("Detected Java build tool %s via root manifest %s", tool.Name(), manifest)
+				return tool
+			}
+		}
+	}
 
 	for _, tool := range registeredBuildTools {
 		detected, err := tool.Detect(ctx, dir)
