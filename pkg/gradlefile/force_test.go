@@ -25,7 +25,7 @@ func TestEnsureForceBlock_NewBlockGroovy(t *testing.T) {
 		ForceBlockBegin,
 		ForceBlockEnd,
 		"allprojects {",
-		"configurations.all {",
+		"configurations.matching { it.name ==~ /.*([Cc]ompileClasspath|[Rr]untimeClasspath)/ }.all {",
 		"resolutionStrategy {",
 		"force 'io.netty:netty-buffer:4.1.133.Final'",
 		"force 'io.netty:netty-codec:4.1.133.Final'",
@@ -45,8 +45,12 @@ func TestEnsureForceBlock_NewBlockKotlin(t *testing.T) {
 	if err := f.EnsureForceBlock(map[string]string{"a.b:c": "1.0"}); err != nil {
 		t.Fatalf("EnsureForceBlock() error = %v", err)
 	}
-	if !strings.Contains(string(f.Content()), `force("a.b:c:1.0")`) {
-		t.Errorf("kotlin force syntax missing:\n%s", f.Content())
+	updated := string(f.Content())
+	if !strings.Contains(updated, `force("a.b:c:1.0")`) {
+		t.Errorf("kotlin force syntax missing:\n%s", updated)
+	}
+	if !strings.Contains(updated, `configurations.matching { it.name.matches(Regex(".*([Cc]ompileClasspath|[Rr]untimeClasspath)")) }.all {`) {
+		t.Errorf("kotlin classpath allowlist missing:\n%s", updated)
 	}
 }
 

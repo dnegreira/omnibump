@@ -561,7 +561,7 @@ omnibump --packages "io.netty@netty-codec-http2@4.1.133.Final"
 // entries are merged and deduplicated)
 // omnibump:resolutionStrategy:begin
 allprojects {
-    configurations.all {
+    configurations.matching { it.name ==~ /.*([Cc]ompileClasspath|[Rr]untimeClasspath)/ }.all {
         resolutionStrategy {
             force 'io.netty:netty-codec-http2:4.1.133.Final'
         }
@@ -569,6 +569,13 @@ allprojects {
 }
 // omnibump:resolutionStrategy:end
 ```
+
+The force block only applies to compile and runtime classpaths (including
+per-source-set variants) — the dependency graphs that end up in the built
+artifact. Resolution contexts created by build tooling (Spotless, Checkstyle,
+PMD, code generators, ...) are not touched: their dependencies never ship,
+and their bare resolution contexts cannot disambiguate multi-variant modules
+such as guava 32.x.
 
 ## Cross-Language Projects
 

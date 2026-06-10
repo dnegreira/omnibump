@@ -98,6 +98,17 @@ func (f *BuildFile) forceBlockSpan() (span, bool) {
 	return span{begin, begin + end + len(ForceBlockEnd)}, true
 }
 
+// forceIncludedConfigurations matches the configurations the force block
+// applies to: the java ecosystem's compile and runtime classpaths (including
+// per-source-set variants such as testRuntimeClasspath), which are what ends
+// up in the built artifact. Resolution contexts created by build tooling
+// (formatters, linters, code generators) are deliberately not matched: their
+// dependencies never ship, so pinning there has no security value — and
+// their bare resolution contexts lack the JVM attributes needed to
+// disambiguate multi-variant modules (e.g. forcing guava 32.x into
+// Spotless's configuration fails variant matching on Gradle 7.x).
+const forceIncludedConfigurations = `.*([Cc]ompileClasspath|[Rr]untimeClasspath)`
+
 // renderForceBlock renders the managed block with one force entry per
 // module, sorted for determinism.
 func renderForceBlock(coords map[string]string, dsl DSL) string {
@@ -110,7 +121,11 @@ func renderForceBlock(coords map[string]string, dsl DSL) string {
 	var b strings.Builder
 	b.WriteString(ForceBlockBegin + "\n")
 	b.WriteString("allprojects {\n")
-	b.WriteString("    configurations.all {\n")
+	if dsl == Kotlin {
+		fmt.Fprintf(&b, "    configurations.matching { it.name.matches(Regex(%q)) }.all {\n", forceIncludedConfigurations)
+	} else {
+		fmt.Fprintf(&b, "    configurations.matching { it.name ==~ /%s/ }.all {\n", forceIncludedConfigurations)
+	}
 	b.WriteString("        resolutionStrategy {\n")
 	for _, module := range modules {
 		if dsl == Kotlin {
