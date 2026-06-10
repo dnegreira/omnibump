@@ -109,8 +109,16 @@ func (f *BuildFile) forceBlockSpan() (span, bool) {
 // Spotless's configuration fails variant matching on Gradle 7.x).
 const forceIncludedConfigurations = `.*([Cc]ompileClasspath|[Rr]untimeClasspath)`
 
-// renderForceBlock renders the managed block with one force entry per
-// module, sorted for determinism.
+// renderForceBlock renders the managed block with one force entry and one
+// eachDependency rule per module, sorted for determinism.
+//
+// Both mechanisms are emitted because they defeat different version sources:
+// force wins over transitive requests and platform()/BOM constraints, while
+// the eachDependency rules win over plugins that manage versions through
+// their own resolve rules (notably io.spring.dependency-management, which
+// silently overrides force). The block is wrapped in afterEvaluate so the
+// eachDependency rules are registered after any such plugin registers its
+// own — for resolve rules, the last registered rule decides.
 func renderForceBlock(coords map[string]string, dsl DSL) string {
 	modules := make([]string, 0, len(coords))
 	for module := range coords {
@@ -118,25 +126,40 @@ func renderForceBlock(coords map[string]string, dsl DSL) string {
 	}
 	sort.Strings(modules)
 
-	var b strings.Builder
-	b.WriteString(ForceBlockBegin + "\n")
-	b.WriteString("allprojects {\n")
+	root := newScriptBlock("allprojects")
+	deferred := root.child("afterEvaluate")
+
+	var matched *scriptBlock
 	if dsl == Kotlin {
-		fmt.Fprintf(&b, "    configurations.matching { it.name.matches(Regex(%q)) }.all {\n", forceIncludedConfigurations)
+		matched = deferred.child("configurations.matching { it.name.matches(Regex(%q)) }.all", forceIncludedConfigurations)
 	} else {
-		fmt.Fprintf(&b, "    configurations.matching { it.name ==~ /%s/ }.all {\n", forceIncludedConfigurations)
+		matched = deferred.child("configurations.matching { it.name ==~ /%s/ }.all", forceIncludedConfigurations)
 	}
-	b.WriteString("        resolutionStrategy {\n")
+
+	strategy := matched.child("resolutionStrategy")
 	for _, module := range modules {
 		if dsl == Kotlin {
-			fmt.Fprintf(&b, "            force(%q)\n", module+":"+coords[module])
+			strategy.stmt("force(%s)", dsl.str(module+":"+coords[module]))
 		} else {
-			fmt.Fprintf(&b, "            force '%s'\n", module+":"+coords[module])
+			strategy.stmt("force %s", dsl.str(module+":"+coords[module]))
 		}
 	}
-	b.WriteString("        }\n")
-	b.WriteString("    }\n")
-	b.WriteString("}\n")
+
+	rules := strategy.child("eachDependency")
+	for _, module := range modules {
+		group, artifact, _ := strings.Cut(module, ":")
+		if dsl == Kotlin {
+			rules.stmt("if (requested.group == %s && requested.name == %s) { useVersion(%s) }",
+				dsl.str(group), dsl.str(artifact), dsl.str(coords[module]))
+		} else {
+			rules.stmt("if (it.requested.group == %s && it.requested.name == %s) { it.useVersion(%s) }",
+				dsl.str(group), dsl.str(artifact), dsl.str(coords[module]))
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(ForceBlockBegin + "\n")
+	root.render(&b, 0)
 	b.WriteString(ForceBlockEnd)
 	return b.String()
 }

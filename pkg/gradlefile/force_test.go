@@ -25,10 +25,13 @@ func TestEnsureForceBlock_NewBlockGroovy(t *testing.T) {
 		ForceBlockBegin,
 		ForceBlockEnd,
 		"allprojects {",
+		"afterEvaluate {",
 		"configurations.matching { it.name ==~ /.*([Cc]ompileClasspath|[Rr]untimeClasspath)/ }.all {",
 		"resolutionStrategy {",
 		"force 'io.netty:netty-buffer:4.1.133.Final'",
 		"force 'io.netty:netty-codec:4.1.133.Final'",
+		"eachDependency {",
+		"if (it.requested.group == 'io.netty' && it.requested.name == 'netty-buffer') { it.useVersion('4.1.133.Final') }",
 	} {
 		if !strings.Contains(updated, want) {
 			t.Errorf("missing %q in:\n%s", want, updated)
@@ -51,6 +54,9 @@ func TestEnsureForceBlock_NewBlockKotlin(t *testing.T) {
 	}
 	if !strings.Contains(updated, `configurations.matching { it.name.matches(Regex(".*([Cc]ompileClasspath|[Rr]untimeClasspath)")) }.all {`) {
 		t.Errorf("kotlin classpath allowlist missing:\n%s", updated)
+	}
+	if !strings.Contains(updated, `if (requested.group == "a.b" && requested.name == "c") { useVersion("1.0") }`) {
+		t.Errorf("kotlin eachDependency rule missing:\n%s", updated)
 	}
 }
 

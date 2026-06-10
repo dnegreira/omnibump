@@ -561,9 +561,14 @@ omnibump --packages "io.netty@netty-codec-http2@4.1.133.Final"
 // entries are merged and deduplicated)
 // omnibump:resolutionStrategy:begin
 allprojects {
-    configurations.matching { it.name ==~ /.*([Cc]ompileClasspath|[Rr]untimeClasspath)/ }.all {
-        resolutionStrategy {
-            force 'io.netty:netty-codec-http2:4.1.133.Final'
+    afterEvaluate {
+        configurations.matching { it.name ==~ /.*([Cc]ompileClasspath|[Rr]untimeClasspath)/ }.all {
+            resolutionStrategy {
+                force 'io.netty:netty-codec-http2:4.1.133.Final'
+                eachDependency {
+                    if (it.requested.group == 'io.netty' && it.requested.name == 'netty-codec-http2') { it.useVersion('4.1.133.Final') }
+                }
+            }
         }
     }
 }
@@ -576,6 +581,12 @@ artifact. Resolution contexts created by build tooling (Spotless, Checkstyle,
 PMD, code generators, ...) are not touched: their dependencies never ship,
 and their bare resolution contexts cannot disambiguate multi-variant modules
 such as guava 32.x.
+
+Both force and eachDependency rules are emitted, registered in
+afterEvaluate: force defeats transitive requests and platform()/BOM
+constraints, while the eachDependency rules (registered last) defeat plugins
+that manage versions through their own resolve rules, such as
+io.spring.dependency-management — which silently overrides a plain force.
 
 ## Cross-Language Projects
 
