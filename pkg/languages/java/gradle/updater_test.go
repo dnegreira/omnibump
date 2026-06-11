@@ -490,3 +490,31 @@ func TestGradleAnalyzer_Analyze_ModelBacked(t *testing.T) {
 		t.Errorf("PropertySources[netty] = %q", source)
 	}
 }
+
+func TestGradle_Update_ResolutionRuleBridge(t *testing.T) {
+	// kafbat v1.5.0 shape: the netty version lives only in the [versions]
+	// catalog key, applied group-wide through the project's own
+	// eachDependency rule reading libs.versions.netty.get(). A module dep
+	// must route to the catalog key, not the force block.
+	dir := copyFixture(t, "kafbat-rule-style")
+
+	updateAndValidate(t, &languages.UpdateConfig{
+		RootDir: dir,
+		Dependencies: []languages.Dependency{
+			{Name: "io.netty:netty-codec", Version: "4.1.133.Final"},
+			{Name: "com.signalfx.public:signalfx-java", Version: "1.0.49"},
+		},
+	})
+
+	catalog := readFile(t, filepath.Join(dir, "gradle", "libs.versions.toml"))
+	if !strings.Contains(catalog, `netty = '4.1.133.Final'`) {
+		t.Errorf("catalog key not updated through the resolution rule:\n%s", catalog)
+	}
+	build := readFile(t, filepath.Join(dir, "build.gradle"))
+	if !strings.Contains(build, `details.useVersion '1.0.49'`) {
+		t.Errorf("literal rule not updated:\n%s", build)
+	}
+	if strings.Contains(build, "omnibump:resolutionStrategy") {
+		t.Errorf("rule-governed deps must not fall through to the force block:\n%s", build)
+	}
+}

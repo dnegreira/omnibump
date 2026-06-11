@@ -455,3 +455,50 @@ func TestEditBuffer_ConflictDetection(t *testing.T) {
 		t.Errorf("ChangeCount() = %d, want 1", f.ChangeCount())
 	}
 }
+
+func TestParseBuild_ResolutionRules(t *testing.T) {
+	content := `eachDependency { DependencyResolveDetails details ->
+    if (details.requested.group == "io.netty" && !details.requested.name.startsWith("netty-tcnative-")) {
+        details.useVersion(libs.versions.netty.get())
+    }
+    if (details.requested.group == 'com.signalfx.public') {
+        if (details.requested.name == 'signalfx-java') {
+            details.useVersion '1.0.49'
+        }
+    }
+    if (details.requested.group == 'org.yaml' && details.requested.name == 'snakeyaml') {
+        details.useVersion("$snakeyamlVersion")
+    }
+}`
+	f := mustParseBuild(t, "build.gradle", content)
+
+	rules := f.ResolutionRules()
+	if len(rules) != 3 {
+		t.Fatalf("ResolutionRules() = %d rules, want 3: %+v", len(rules), rules)
+	}
+
+	// Group-wide rule reading a catalog version accessor.
+	if r := rules[0]; r.Group != "io.netty" || r.Artifact != "" || r.CatalogKey != "netty" {
+		t.Errorf("catalog accessor rule = %+v", r)
+	}
+	// Kayenta-style nested rule with a literal: outer group, inner name.
+	if r := rules[1]; r.Group != "com.signalfx.public" || r.Artifact != "signalfx-java" || r.Version != "1.0.49" {
+		t.Errorf("nested literal rule = %+v", r)
+	}
+	// Interpolated variable rule.
+	if r := rules[2]; r.Group != "org.yaml" || r.Artifact != "snakeyaml" || r.VarRef != "snakeyamlVersion" {
+		t.Errorf("variable rule = %+v", r)
+	}
+
+	// Literal rules are editable in place.
+	if err := f.SetResolutionRuleVersion(rules[1], "1.0.50"); err != nil {
+		t.Fatalf("SetResolutionRuleVersion() error = %v", err)
+	}
+	if !strings.Contains(string(f.Content()), `details.useVersion '1.0.50'`) {
+		t.Errorf("literal rule not updated:\n%s", f.Content())
+	}
+	// Catalog-backed rules are not editable in place.
+	if err := f.SetResolutionRuleVersion(rules[0], "1.0.0"); err == nil {
+		t.Error("SetResolutionRuleVersion() on a catalog-backed rule should error")
+	}
+}

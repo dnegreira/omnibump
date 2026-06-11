@@ -61,6 +61,18 @@ type projectModel struct {
 	// by a catalog alias (normalized), so catalog bumps can keep the strictly
 	// literal consistent.
 	strictlyAliasSites map[string][]declarationSite
+
+	// resolutionRuleSites indexes dependency resolve rules by group; rules
+	// link modules to the catalog key, variable or literal governing their
+	// version when nothing else does (e.g. kafbat's group-wide
+	// useVersion(libs.versions.netty.get()) rule).
+	resolutionRuleSites map[string][]resolutionRuleSite
+}
+
+// resolutionRuleSite is one resolve rule in a build script.
+type resolutionRuleSite struct {
+	build *gradlefile.BuildFile
+	rule  gradlefile.ResolutionRule
 }
 
 // catalogVersionSite is one definition site of a catalog version key; exactly
@@ -162,6 +174,7 @@ func buildProjectModel(ctx context.Context, rootDir string) (*projectModel, erro
 		declarationSites:    make(map[string][]declarationSite),
 		libraryFnSites:      make(map[string][]declarationSite),
 		strictlyAliasSites:  make(map[string][]declarationSite),
+		resolutionRuleSites: make(map[string][]resolutionRuleSite),
 	}
 
 	for _, path := range files {
@@ -304,12 +317,17 @@ func (m *projectModel) indexVariables() {
 	}
 }
 
-// indexDeclarations indexes build-script dependency declarations.
+// indexDeclarations indexes build-script dependency declarations and
+// resolve rules.
 func (m *projectModel) indexDeclarations() {
 	for _, path := range m.sortedFiles {
 		build, ok := m.builds[path]
 		if !ok {
 			continue
+		}
+		for _, rule := range build.ResolutionRules() {
+			m.resolutionRuleSites[rule.Group] = append(m.resolutionRuleSites[rule.Group],
+				resolutionRuleSite{build: build, rule: rule})
 		}
 		for _, decl := range build.Dependencies() {
 			site := declarationSite{build: build, decl: decl}

@@ -89,13 +89,44 @@ func (v VarDef) Path() string {
 	return v.Name
 }
 
+// ResolutionRule is a dependency resolve rule found in a build script: a
+// conditional inside resolutionStrategy.eachDependency that redirects a
+// group (or one module) to a version source, e.g.
+//
+//	if (details.requested.group == "io.netty" && !details.requested.name.startsWith("netty-tcnative-")) {
+//	    details.useVersion(libs.versions.netty.get())
+//	}
+//
+// Rules link modules to the catalog key, variable or literal that governs
+// their version even when no [libraries] entry or interpolation does.
+type ResolutionRule struct {
+	// Group is the dependency group the rule matches.
+	Group string
+
+	// Artifact narrows the rule to one module; empty matches the whole group.
+	Artifact string
+
+	// CatalogKey is the referenced [versions] key (normalized) when the rule
+	// reads a catalog version accessor such as libs.versions.netty.get().
+	CatalogKey string
+
+	// VarRef is the referenced variable path when the rule interpolates one.
+	VarRef string
+
+	// Version is the literal version, or empty.
+	Version string
+
+	versionSpan span
+}
+
 // BuildFile is a parsed Gradle build script.
 type BuildFile struct {
-	path string
-	dsl  DSL
-	buf  editBuffer
-	deps []DependencyDecl
-	vars []VarDef
+	path  string
+	dsl   DSL
+	buf   editBuffer
+	deps  []DependencyDecl
+	vars  []VarDef
+	rules []ResolutionRule
 }
 
 // ParseBuild parses a Gradle build script (build.gradle, build.gradle.kts or
@@ -108,6 +139,7 @@ func ParseBuild(path string, content []byte) (*BuildFile, error) {
 	}
 	f.scanDependencies()
 	f.scanVariables()
+	f.scanResolutionRules()
 	return f, nil
 }
 
@@ -122,6 +154,22 @@ func (f *BuildFile) Dependencies() []DependencyDecl { return f.deps }
 
 // Variables returns all version-variable definitions found in the script.
 func (f *BuildFile) Variables() []VarDef { return f.vars }
+
+// ResolutionRules returns all dependency resolve rules found in the script.
+func (f *BuildFile) ResolutionRules() []ResolutionRule { return f.rules }
+
+// SetResolutionRuleVersion queues an in-place rewrite of r's version
+// literal. Rules whose version comes from a catalog key or variable cannot
+// be edited here; update the referenced source instead.
+func (f *BuildFile) SetResolutionRuleVersion(r ResolutionRule, version string) error {
+	if err := ValidateVersion(version); err != nil {
+		return err
+	}
+	if r.Version == "" || !r.versionSpan.valid() {
+		return fmt.Errorf("%w: resolution rule for %s has no literal version in %s", ErrNotEditable, r.Group, f.path)
+	}
+	return f.buf.add(r.versionSpan, version)
+}
 
 // Content renders the script with all queued edits applied.
 func (f *BuildFile) Content() []byte { return f.buf.render() }
@@ -449,6 +497,97 @@ func (f *BuildFile) scanKotlinExtras(content []byte) {
 			})
 		}
 	}
+}
+
+// conditionalBlock is one if-condition and its brace-delimited body.
+type conditionalBlock struct {
+	condition span
+	body      span
+}
+
+// scanResolutionRules records eachDependency resolve rules: each useVersion
+// call is associated with the group/name equality conditions of every
+// enclosing if block (kayenta-style rules nest a name condition inside a
+// group condition; kafbat-style rules put both in one condition). Extra
+// conditions such as negated startsWith calls are deliberately ignored: the
+// rule still identifies which version source governs the group, and bumping
+// that source preserves the rule's exact applicability.
+func (f *BuildFile) scanResolutionRules() {
+	content := f.buf.original
+	conditionals := scanConditionalBlocks(content)
+
+	for _, m := range useVersionPattern.FindAllSubmatchIndex(content, -1) {
+		if lineIsComment(content, m[0]) {
+			continue
+		}
+
+		var group, artifact string
+		for _, c := range conditionals {
+			if m[0] < c.body.start || m[0] >= c.body.end {
+				continue
+			}
+			condition := content[c.condition.start:c.condition.end]
+			if g := ruleGroupCondPattern.FindSubmatch(condition); g != nil {
+				group = string(g[1])
+			}
+			if n := ruleNameCondPattern.FindSubmatch(condition); n != nil {
+				artifact = string(n[1])
+			}
+		}
+		if group == "" {
+			continue
+		}
+
+		rule := ResolutionRule{Group: group, Artifact: artifact, versionSpan: span{-1, -1}}
+		switch {
+		case m[2] >= 0: // parenthesized argument
+			arg := strings.TrimSpace(string(content[m[2]:m[3]]))
+			if accessor := catalogVersionAccessorPattern.FindStringSubmatch(arg); accessor != nil {
+				rule.CatalogKey = NormalizeAlias(accessor[1])
+			} else if quoted := quotedLiteralPattern.FindSubmatchIndex(content[m[2]:m[3]]); quoted != nil {
+				token := string(content[m[2]+quoted[2] : m[2]+quoted[3]])
+				literal, varRef := parseVersionToken(token)
+				rule.Version = literal
+				rule.VarRef = varRef
+				if literal != "" {
+					rule.versionSpan = span{m[2] + quoted[2], m[2] + quoted[3]}
+				}
+			} else {
+				_, rule.VarRef = parseVersionToken("$" + arg)
+			}
+		case m[4] >= 0: // paren-less Groovy string argument
+			literal, varRef := parseVersionToken(string(content[m[4]:m[5]]))
+			rule.Version = literal
+			rule.VarRef = varRef
+			if literal != "" {
+				rule.versionSpan = span{m[4], m[5]}
+			}
+		}
+		f.rules = append(f.rules, rule)
+	}
+}
+
+// scanConditionalBlocks collects every if block with its bracket-matched
+// condition and body spans.
+func scanConditionalBlocks(content []byte) []conditionalBlock {
+	var blocks []conditionalBlock
+	for _, m := range ruleIfPattern.FindAllIndex(content, -1) {
+		condition, ok := bracketSpan(content, m[1]-1, '(', ')')
+		if !ok {
+			continue
+		}
+		// The body opens at the first brace after the condition closes.
+		braceOpen := condition.end + 1
+		for braceOpen < len(content) && (content[braceOpen] == ' ' || content[braceOpen] == '\t' || content[braceOpen] == '\n' || content[braceOpen] == '\r') {
+			braceOpen++
+		}
+		body, ok := bracketSpan(content, braceOpen, '{', '}')
+		if !ok {
+			continue
+		}
+		blocks = append(blocks, conditionalBlock{condition: condition, body: body})
+	}
+	return blocks
 }
 
 // addVar appends v unless the same value span was already recorded (the ext

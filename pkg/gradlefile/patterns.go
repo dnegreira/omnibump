@@ -106,6 +106,33 @@ var (
 	// dependencySetEntryPattern matches one entry inside a dependencySet
 	// block: entry 'logback-classic' / entry("logback-classic").
 	dependencySetEntryPattern = regexp.MustCompile(`entry\s*\(?\s*["']([A-Za-z0-9._-]+)["']\s*\)?`)
+
+	// useVersionPattern matches the version argument of a dependency resolve
+	// rule, in both call styles:
+	//   details.useVersion(libs.versions.netty.get())
+	//   details.useVersion '1.0.49'
+	// Group 1: parenthesized argument, group 2: paren-less Groovy string.
+	useVersionPattern = regexp.MustCompile(`useVersion\s*(?:\(([^()]*(?:\([^()]*\))*[^()]*)\)|["']([^"']+)["'])`)
+
+	// ruleIfPattern locates conditional blocks inside resolve rules; the
+	// condition and body are bracket-matched from the match position.
+	ruleIfPattern = regexp.MustCompile(`if\s*\(`)
+
+	// ruleGroupCondPattern extracts a group equality condition from a resolve
+	// rule, e.g. details.requested.group == "io.netty".
+	ruleGroupCondPattern = regexp.MustCompile(`requested\.group\s*==\s*["']([A-Za-z0-9._-]+)["']`)
+
+	// ruleNameCondPattern extracts a module-name equality condition from a
+	// resolve rule, e.g. details.requested.name == 'signalfx-java'.
+	ruleNameCondPattern = regexp.MustCompile(`requested\.name\s*==\s*["']([A-Za-z0-9._-]+)["']`)
+
+	// catalogVersionAccessorPattern matches typed catalog version accessors
+	// used as useVersion arguments: libs.versions.netty.get().
+	catalogVersionAccessorPattern = regexp.MustCompile(`^libs\.versions\.([A-Za-z0-9_.]+)\.get\(\)$`)
+
+	// quotedLiteralPattern extracts a quoted string and its offsets from a
+	// useVersion argument.
+	quotedLiteralPattern = regexp.MustCompile(`["']([^"']*)["']`)
 )
 
 // parseVersionToken classifies the version part of a declaration. It returns
