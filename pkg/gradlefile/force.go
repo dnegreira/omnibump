@@ -6,9 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 package gradlefile
 
 import (
+	"bytes"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -86,12 +88,11 @@ func (f *BuildFile) EnsureForceBlock(coords map[string]string) error {
 // forceBlockSpan returns the span of the existing managed block, from the
 // begin marker through the end marker.
 func (f *BuildFile) forceBlockSpan() (span, bool) {
-	content := string(f.buf.original)
-	begin := strings.Index(content, ForceBlockBegin)
+	begin := bytes.Index(f.buf.original, []byte(ForceBlockBegin))
 	if begin < 0 {
 		return span{-1, -1}, false
 	}
-	end := strings.Index(content[begin:], ForceBlockEnd)
+	end := bytes.Index(f.buf.original[begin:], []byte(ForceBlockEnd))
 	if end < 0 {
 		return span{-1, -1}, false
 	}
@@ -120,11 +121,7 @@ const forceIncludedConfigurations = `.*([Cc]ompileClasspath|[Rr]untimeClasspath)
 // eachDependency rules are registered after any such plugin registers its
 // own — for resolve rules, the last registered rule decides.
 func renderForceBlock(coords map[string]string, dsl DSL) string {
-	modules := make([]string, 0, len(coords))
-	for module := range coords {
-		modules = append(modules, module)
-	}
-	sort.Strings(modules)
+	modules := slices.Sorted(maps.Keys(coords))
 
 	root := newScriptBlock("allprojects")
 	deferred := root.child("afterEvaluate")

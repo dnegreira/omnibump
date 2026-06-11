@@ -514,9 +514,13 @@ type conditionalBlock struct {
 // that source preserves the rule's exact applicability.
 func (f *BuildFile) scanResolutionRules() {
 	content := f.buf.original
+	matches := useVersionPattern.FindAllSubmatchIndex(content, -1)
+	if len(matches) == 0 {
+		return
+	}
 	conditionals := scanConditionalBlocks(content)
 
-	for _, m := range useVersionPattern.FindAllSubmatchIndex(content, -1) {
+	for _, m := range matches {
 		if lineIsComment(content, m[0]) {
 			continue
 		}

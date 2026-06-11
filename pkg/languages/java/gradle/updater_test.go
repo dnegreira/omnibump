@@ -19,28 +19,8 @@ import (
 // returns the temp dir path.
 func copyFixture(t *testing.T, fixture string) string {
 	t.Helper()
-	src := filepath.Join("testdata", fixture)
 	dst := t.TempDir()
-
-	err := filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o750)
-		}
-		content, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, content, 0o600)
-	})
-	if err != nil {
+	if err := os.CopyFS(dst, os.DirFS(filepath.Join("testdata", fixture))); err != nil {
 		t.Fatalf("failed to copy fixture %s: %v", fixture, err)
 	}
 	return dst

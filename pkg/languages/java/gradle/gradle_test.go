@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/chainguard-dev/omnibump/pkg/analyzer"
+	"github.com/chainguard-dev/omnibump/pkg/gradlefile"
 	"github.com/chainguard-dev/omnibump/pkg/languages"
 )
 
@@ -1357,9 +1358,9 @@ func TestValidateVersion_ValidVersions(t *testing.T) {
 
 	for _, version := range validVersions {
 		t.Run(version, func(t *testing.T) {
-			err := validateVersion(version)
+			err := gradlefile.ValidateVersion(version)
 			if err != nil {
-				t.Errorf("validateVersion(%q) should be valid, got error: %v", version, err)
+				t.Errorf("ValidateVersion(%q) should be valid, got error: %v", version, err)
 			}
 		})
 	}
@@ -1432,12 +1433,12 @@ dependencies {
 
 	for _, tt := range invalidVersions {
 		t.Run(tt.desc, func(t *testing.T) {
-			err := validateVersion(tt.version)
+			err := gradlefile.ValidateVersion(tt.version)
 			if err == nil {
-				t.Errorf("validateVersion(%q) should be invalid for: %s", tt.version, tt.desc)
+				t.Errorf("ValidateVersion(%q) should be invalid for: %s", tt.version, tt.desc)
 			}
 			if err != nil && !strings.Contains(err.Error(), "invalid version string") {
-				t.Errorf("validateVersion(%q) error should mention invalid version, got: %v", tt.version, err)
+				t.Errorf("ValidateVersion(%q) error should mention invalid version, got: %v", tt.version, err)
 			}
 		})
 	}

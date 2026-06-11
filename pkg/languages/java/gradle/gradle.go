@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/chainguard-dev/clog"
@@ -56,15 +55,6 @@ const (
 )
 
 var (
-	// versionValidationRegex defines the allowlist for valid version strings.
-	// Only allows alphanumeric characters, dots, underscores, hyphens, and plus signs.
-	// This prevents injection of quotes, parentheses, newlines, braces, and other
-	// characters that could be used for code injection in Gradle build files.
-	versionValidationRegex = regexp.MustCompile(`^[a-zA-Z0-9._+-]+$`)
-
-	// ErrInvalidVersion is returned when a version string fails validation.
-	ErrInvalidVersion = errors.New("invalid version string: contains disallowed characters")
-
 	// ErrRemoteAnalysisNotImplemented is returned when remote analysis is not implemented.
 	ErrRemoteAnalysisNotImplemented = errors.New("remote analysis not yet implemented")
 
@@ -87,16 +77,6 @@ var skipDirs = map[string]struct{}{
 	"node_modules": {},
 }
 
-// validateVersion checks if a version string contains only safe characters.
-// Returns an error if the version contains characters that could be used for
-// code injection (quotes, parentheses, newlines, braces, etc.).
-func validateVersion(version string) error {
-	if !versionValidationRegex.MatchString(version) {
-		return fmt.Errorf("%w: %q (allowed characters: a-zA-Z0-9._+-)", ErrInvalidVersion, version)
-	}
-	return nil
-}
-
 // Name returns the build tool identifier.
 func (g *Gradle) Name() string {
 	return gradleToolName
@@ -105,15 +85,7 @@ func (g *Gradle) Name() string {
 // Detect checks if Gradle manifest files exist in the directory.
 func (g *Gradle) Detect(ctx context.Context, dir string) (bool, error) {
 	log := clog.FromContext(ctx)
-	// Check for build files in priority order
-	buildFiles := []string{
-		buildGradleKtsFile, // Kotlin DSL (modern)
-		buildGradleFile,    // Groovy DSL (legacy)
-		settingsGradleKtsFile,
-		settingsGradleFile,
-	}
-
-	for _, file := range buildFiles {
+	for _, file := range g.GetManifestFiles() {
 		if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
 			log.Debugf("Detected Gradle project at %s (found %s)", dir, file)
 			return true, nil
@@ -157,12 +129,12 @@ func (g *Gradle) Update(ctx context.Context, cfg *languages.UpdateConfig) error 
 		if dep.Version == "" {
 			continue
 		}
-		if err := validateVersion(dep.Version); err != nil {
+		if err := gradlefile.ValidateVersion(dep.Version); err != nil {
 			return fmt.Errorf("dependency %s: %w", depDisplayName(dep), err)
 		}
 	}
 	for name, value := range cfg.Properties {
-		if err := validateVersion(value); err != nil {
+		if err := gradlefile.ValidateVersion(value); err != nil {
 			return fmt.Errorf("property %s: %w", name, err)
 		}
 	}
@@ -236,7 +208,7 @@ func validateDependency(model *projectModel, dep languages.Dependency) string {
 	}
 	module := group + ":" + artifact
 
-	versions := effectiveVersions(model, module, artifact)
+	versions := effectiveVersions(model, module, group, artifact)
 	if len(versions) == 0 {
 		return fmt.Sprintf("%s: not found in project after update", module)
 	}
@@ -250,7 +222,7 @@ func validateDependency(model *projectModel, dep languages.Dependency) string {
 
 // effectiveVersions collects every version the project resolves module to,
 // across catalogs, declarations, referenced variables and force blocks.
-func effectiveVersions(model *projectModel, module, artifact string) []effectiveVersion {
+func effectiveVersions(model *projectModel, module, group, artifact string) []effectiveVersion {
 	var versions []effectiveVersion
 
 	for _, site := range model.catalogLibrarySites[module] {
@@ -275,25 +247,7 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 				desc:    fmt.Sprintf("has version %s", site.decl.Version),
 			})
 		case site.decl.VarRef != "":
-			varSites := model.variableSites[site.decl.VarRef]
-			if len(varSites) == 0 {
-				// Catalog-accessor bridge: "${versions.x}" resolving to the
-				// catalog version key x.
-				if key, ok := model.catalogKeyForVarPath(site.decl.VarRef); ok {
-					for _, keySite := range model.catalogVersionSites[key] {
-						versions = append(versions, effectiveVersion{
-							version: keySite.version.Value,
-							desc:    fmt.Sprintf("catalog key %s has version %s", key, keySite.version.Value),
-						})
-					}
-				}
-			}
-			for _, varSite := range varSites {
-				versions = append(versions, effectiveVersion{
-					version: varSite.value(),
-					desc:    fmt.Sprintf("variable %s has version %s", site.decl.VarRef, varSite.value()),
-				})
-			}
+			versions = append(versions, variableEffectiveVersions(model, site.decl.VarRef)...)
 		}
 	}
 	for _, site := range model.libraryFnSites[artifact] {
@@ -302,7 +256,6 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 			desc:    fmt.Sprintf("has version %s", site.decl.Version),
 		})
 	}
-	group, _, _ := strings.Cut(module, ":")
 	for _, site := range model.resolutionRuleSites[group] {
 		rule := site.rule
 		if rule.Artifact != "" && rule.Artifact != artifact {
@@ -317,12 +270,7 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 				})
 			}
 		case rule.VarRef != "":
-			for _, varSite := range model.variableSites[rule.VarRef] {
-				versions = append(versions, effectiveVersion{
-					version: varSite.value(),
-					desc:    fmt.Sprintf("variable %s has version %s", rule.VarRef, varSite.value()),
-				})
-			}
+			versions = append(versions, variableEffectiveVersions(model, rule.VarRef)...)
 		case rule.Version != "":
 			versions = append(versions, effectiveVersion{
 				version: rule.Version,
@@ -330,17 +278,38 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 			})
 		}
 	}
-	for _, path := range model.sortedFiles {
-		build, ok := model.builds[path]
-		if !ok {
-			continue
+	for _, version := range model.forcedSites[module] {
+		versions = append(versions, effectiveVersion{
+			version: version,
+			desc:    fmt.Sprintf("forced to version %s", version),
+		})
+	}
+	return versions
+}
+
+// variableEffectiveVersions resolves a variable reference the same way the
+// updater routes it: definition sites first, then the catalog-accessor
+// bridge ("${versions.x}" resolving to the catalog version key x).
+func variableEffectiveVersions(model *projectModel, varPath string) []effectiveVersion {
+	varSites := model.variableSites[varPath]
+	if len(varSites) == 0 {
+		if key, ok := model.catalogKeyForVarPath(varPath); ok {
+			versions := make([]effectiveVersion, 0, len(model.catalogVersionSites[key]))
+			for _, keySite := range model.catalogVersionSites[key] {
+				versions = append(versions, effectiveVersion{
+					version: keySite.version.Value,
+					desc:    fmt.Sprintf("catalog key %s has version %s", key, keySite.version.Value),
+				})
+			}
+			return versions
 		}
-		if version, forced := build.ForcedCoordinates()[module]; forced {
-			versions = append(versions, effectiveVersion{
-				version: version,
-				desc:    fmt.Sprintf("forced to version %s", version),
-			})
-		}
+	}
+	versions := make([]effectiveVersion, 0, len(varSites))
+	for _, varSite := range varSites {
+		versions = append(versions, effectiveVersion{
+			version: varSite.value(),
+			desc:    fmt.Sprintf("variable %s has version %s", varPath, varSite.value()),
+		})
 	}
 	return versions
 }
@@ -348,23 +317,22 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 // validateProperty verifies that every definition site of the property
 // carries the expected value. Returns a failure description or "".
 func validateProperty(model *projectModel, name, expected string) string {
-	sites := 0
-	for _, site := range model.catalogVersionSites[name] {
-		sites++
+	catalogSites := model.catalogVersionSites[name]
+	variableSites := model.variableSitesFor(name)
+	if len(catalogSites) == 0 && len(variableSites) == 0 {
+		return fmt.Sprintf("property %s: %v", name, ErrPropertyNotFound)
+	}
+	for _, site := range catalogSites {
 		if site.version.Value != expected {
 			return fmt.Sprintf("property %s: catalog key has value %s in %s, expected %s",
 				name, site.version.Value, site.path(), expected)
 		}
 	}
-	for _, site := range model.variableSitesFor(name) {
-		sites++
+	for _, site := range variableSites {
 		if site.value() != expected {
 			return fmt.Sprintf("property %s: has value %s in %s, expected %s",
 				name, site.value(), site.path(), expected)
 		}
-	}
-	if sites == 0 {
-		return fmt.Sprintf("property %s: %v", name, ErrPropertyNotFound)
 	}
 	return ""
 }
