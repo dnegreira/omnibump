@@ -7,8 +7,9 @@ package gradlefile
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -98,12 +99,8 @@ func (f *CatalogFile) collectVersions(versions map[string]any) {
 	if !ok {
 		return
 	}
-	keys := make([]string, 0, len(versions))
-	for key := range versions {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
+	entries := indexSectionEntries(f.buf.original, section)
+	for _, key := range slices.Sorted(maps.Keys(versions)) {
 		value, isString := versions[key].(string)
 		if !isString {
 			// Rich versions ({ strictly = "..." }) are recorded without an
@@ -113,7 +110,7 @@ func (f *CatalogFile) collectVersions(versions map[string]any) {
 		f.versions = append(f.versions, CatalogVersion{
 			Key:       key,
 			Value:     value,
-			valueSpan: tomlValueSpan(f.buf.original, section, key, value),
+			valueSpan: valueSpanIn(f.buf.original, entries[key], value),
 		})
 	}
 }
@@ -123,12 +120,8 @@ func (f *CatalogFile) collectVersions(versions map[string]any) {
 // version string.
 func (f *CatalogFile) collectLibraries(libraries map[string]any) {
 	section, _ := tomlSectionSpan(f.buf.original, "libraries")
-	aliases := make([]string, 0, len(libraries))
-	for alias := range libraries {
-		aliases = append(aliases, alias)
-	}
-	sort.Strings(aliases)
-	for _, alias := range aliases {
+	entries := indexSectionEntries(f.buf.original, section)
+	for _, alias := range slices.Sorted(maps.Keys(libraries)) {
 		entry, isTable := libraries[alias].(map[string]any)
 		if !isTable {
 			continue
@@ -138,7 +131,7 @@ func (f *CatalogFile) collectLibraries(libraries map[string]any) {
 			continue
 		}
 		if lib.Version != "" {
-			lib.versionSpan = tomlInlineLibraryVersionSpan(f.buf.original, section, alias, lib.Version)
+			lib.versionSpan = inlineVersionSpanIn(f.buf.original, entries[alias], lib.Version)
 		}
 		f.libraries = append(f.libraries, lib)
 	}
@@ -175,53 +168,74 @@ func parseLibraryEntry(alias string, entry map[string]any) (CatalogLibrary, bool
 	return lib, true
 }
 
+// tomlSectionHeaderPattern matches a top-level TOML section header line and
+// captures its name.
+var tomlSectionHeaderPattern = regexp.MustCompile(`(?m)^\[([A-Za-z0-9_.-]+)\]\s*$`)
+
+// tomlEntryLinePattern matches one `key = ...` line of a TOML section.
+// Group 1: key (quotes stripped), group 2: the value remainder.
+var tomlEntryLinePattern = regexp.MustCompile(`(?m)^[ \t]*["']?([A-Za-z0-9_.-]+)["']?[ \t]*=[ \t]*([^\n]*)$`)
+
+// tomlInlineVersionPattern matches a quoted inline version assignment inside
+// an inline table remainder.
+var tomlInlineVersionPattern = regexp.MustCompile(`version\s*=\s*["']([^"']*)["']`)
+
 // tomlSectionSpan returns the span of a top-level TOML section body (from
 // the line after the [name] header to the next section header or EOF).
 func tomlSectionSpan(content []byte, name string) (span, bool) {
-	header := regexp.MustCompile(`(?m)^\[` + regexp.QuoteMeta(name) + `\]\s*$`)
-	m := header.FindIndex(content)
-	if m == nil {
-		return span{-1, -1}, false
+	for _, m := range tomlSectionHeaderPattern.FindAllSubmatchIndex(content, -1) {
+		if string(content[m[2]:m[3]]) != name {
+			continue
+		}
+		rest := content[m[1]:]
+		if n := tomlSectionHeaderPattern.FindIndex(rest); n != nil {
+			return span{m[1], m[1] + n[0]}, true
+		}
+		return span{m[1], len(content)}, true
 	}
-	next := regexp.MustCompile(`(?m)^\[`)
-	rest := content[m[1]:]
-	if n := next.FindIndex(rest); n != nil {
-		return span{m[1], m[1] + n[0]}, true
-	}
-	return span{m[1], len(content)}, true
+	return span{-1, -1}, false
 }
 
-// tomlValueSpan locates the quoted value of `key = "value"` within section.
-func tomlValueSpan(content []byte, section span, key, value string) span {
+// indexSectionEntries locates every `key = ...` line of a section in one
+// pass, mapping each key to the span of its value remainder.
+func indexSectionEntries(content []byte, section span) map[string]span {
+	entries := make(map[string]span)
 	if !section.valid() {
+		return entries
+	}
+	for _, m := range tomlEntryLinePattern.FindAllSubmatchIndex(content[section.start:section.end], -1) {
+		key := string(content[section.start+m[2] : section.start+m[3]])
+		if _, seen := entries[key]; !seen {
+			entries[key] = span{section.start + m[4], section.start + m[5]}
+		}
+	}
+	return entries
+}
+
+// valueSpanIn locates the quoted value literal within an entry's value
+// remainder.
+func valueSpanIn(content []byte, rest span, value string) span {
+	if !rest.valid() {
 		return span{-1, -1}
 	}
-	pattern := regexp.MustCompile(`(?m)^\s*["']?` + regexp.QuoteMeta(key) + `["']?\s*=\s*["']` + regexp.QuoteMeta(value) + `["']`)
-	m := pattern.FindIndex(content[section.start:section.end])
-	if m == nil {
-		return span{-1, -1}
-	}
-	line := content[section.start+m[0] : section.start+m[1]]
-	offset := strings.LastIndex(string(line), value)
+	offset := strings.Index(string(content[rest.start:rest.end]), value)
 	if offset < 0 {
 		return span{-1, -1}
 	}
-	start := section.start + m[0] + offset
-	return span{start, start + len(value)}
+	return span{rest.start + offset, rest.start + offset + len(value)}
 }
 
-// tomlInlineLibraryVersionSpan locates the inline version literal of a
-// [libraries] entry declared as a single-line inline table, e.g.
+// inlineVersionSpanIn locates the inline `version = "..."` literal within a
+// [libraries] entry's inline-table remainder, e.g.
 //
 //	okio = { module = "com.squareup.okio:okio", version = "3.4.0" }
-func tomlInlineLibraryVersionSpan(content []byte, section span, alias, version string) span {
-	if !section.valid() {
+func inlineVersionSpanIn(content []byte, rest span, version string) span {
+	if !rest.valid() {
 		return span{-1, -1}
 	}
-	pattern := regexp.MustCompile(`(?m)^\s*["']?` + regexp.QuoteMeta(alias) + `["']?\s*=\s*\{[^\n]*version\s*=\s*["'](` + regexp.QuoteMeta(version) + `)["']`)
-	m := pattern.FindSubmatchIndex(content[section.start:section.end])
-	if m == nil {
+	m := tomlInlineVersionPattern.FindSubmatchIndex(content[rest.start:rest.end])
+	if m == nil || string(content[rest.start+m[2]:rest.start+m[3]]) != version {
 		return span{-1, -1}
 	}
-	return span{section.start + m[2], section.start + m[3]}
+	return span{rest.start + m[2], rest.start + m[3]}
 }

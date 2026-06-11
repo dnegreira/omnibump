@@ -8,8 +8,10 @@ package gradle
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -57,16 +59,15 @@ type projectModel struct {
 	// declarations by name, matched against artifact ids.
 	libraryFnSites map[string][]declarationSite
 
-	// strictlyAliasSites indexes strictly-block declarations identified only
-	// by a catalog alias (normalized), so catalog bumps can keep the strictly
-	// literal consistent.
-	strictlyAliasSites map[string][]declarationSite
-
 	// resolutionRuleSites indexes dependency resolve rules by group; rules
 	// link modules to the catalog key, variable or literal governing their
 	// version when nothing else does (e.g. kafbat's group-wide
 	// useVersion(libs.versions.netty.get()) rule).
 	resolutionRuleSites map[string][]resolutionRuleSite
+
+	// forcedSites indexes the managed force-block pins of every build
+	// script by "group:artifact", collected once at scan time.
+	forcedSites map[string][]string
 }
 
 // resolutionRuleSite is one resolve rule in a build script.
@@ -173,12 +174,12 @@ func buildProjectModel(ctx context.Context, rootDir string) (*projectModel, erro
 		variableSites:       make(map[string][]variableSite),
 		declarationSites:    make(map[string][]declarationSite),
 		libraryFnSites:      make(map[string][]declarationSite),
-		strictlyAliasSites:  make(map[string][]declarationSite),
 		resolutionRuleSites: make(map[string][]resolutionRuleSite),
+		forcedSites:         make(map[string][]string),
 	}
 
 	for _, path := range files {
-		if err := m.parseFile(ctx, path); err != nil {
+		if err := m.parseFile(path); err != nil {
 			return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 		}
 	}
@@ -194,7 +195,7 @@ func buildProjectModel(ctx context.Context, rootDir string) (*projectModel, erro
 }
 
 // parseFile reads and parses one discovered file into the model.
-func (m *projectModel) parseFile(_ context.Context, path string) error {
+func (m *projectModel) parseFile(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("failed to stat: %w", err)
@@ -295,7 +296,7 @@ func (m *projectModel) indexCatalogs() {
 func (m *projectModel) indexLibrary(site catalogLibrarySite) {
 	module := site.library.Module()
 	m.catalogLibrarySites[module] = append(m.catalogLibrarySites[module], site)
-	m.aliasModules[normalizeAlias(site.library.Alias)] = module
+	m.aliasModules[gradlefile.NormalizeAlias(site.library.Alias)] = module
 }
 
 // indexVariables indexes version variables from properties files and build
@@ -303,7 +304,14 @@ func (m *projectModel) indexLibrary(site catalogLibrarySite) {
 func (m *projectModel) indexVariables() {
 	for _, path := range m.sortedFiles {
 		if props, ok := m.props[path]; ok {
+			// Keys() repeats duplicated keys; one site per key suffices
+			// because PropertiesFile.Set updates every occurrence.
+			seen := make(map[string]struct{}, len(props.Keys()))
 			for _, key := range props.Keys() {
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
 				m.variableSites[key] = append(m.variableSites[key],
 					variableSite{props: props, key: key})
 			}
@@ -335,22 +343,24 @@ func (m *projectModel) indexDeclarations() {
 			case decl.Kind == gradlefile.LibraryFn:
 				m.libraryFnSites[decl.Artifact] = append(m.libraryFnSites[decl.Artifact], site)
 			case decl.CatalogAlias != "":
-				if decl.Kind == gradlefile.StrictlyBlock {
-					alias := normalizeAlias(decl.CatalogAlias)
-					m.strictlyAliasSites[alias] = append(m.strictlyAliasSites[alias], site)
+				// Strictly constraints identified by a catalog alias resolve
+				// to module coordinates through the catalog, so the regular
+				// declaration tier edits them alongside the catalog key.
+				if decl.Kind != gradlefile.StrictlyBlock {
+					continue
+				}
+				if module, ok := m.aliasModules[gradlefile.NormalizeAlias(decl.CatalogAlias)]; ok {
+					m.declarationSites[module] = append(m.declarationSites[module], site)
 				}
 			case decl.Group != "" && decl.Artifact != "":
 				module := decl.Group + ":" + decl.Artifact
 				m.declarationSites[module] = append(m.declarationSites[module], site)
 			}
 		}
+		for module, version := range build.ForcedCoordinates() {
+			m.forcedSites[module] = append(m.forcedSites[module], version)
+		}
 	}
-}
-
-// normalizeAlias converts catalog accessor paths and alias keys to a common
-// dash-separated form (libs.netty.codec -> netty-codec).
-func normalizeAlias(alias string) string {
-	return gradlefile.NormalizeAlias(alias)
 }
 
 // catalogKeyForVarPath maps a variable reference path shaped like a version
@@ -371,7 +381,7 @@ func (m *projectModel) catalogKeyForVarPath(path string) (string, bool) {
 	}
 	// Catalog accessors split keys on dashes/underscores: versions.commons.lang3
 	// addresses the key "commons-lang3".
-	if normalized := normalizeAlias(rest); len(m.catalogVersionSites[normalized]) > 0 {
+	if normalized := gradlefile.NormalizeAlias(rest); len(m.catalogVersionSites[normalized]) > 0 {
 		return normalized, true
 	}
 	return "", false
@@ -386,7 +396,7 @@ func (m *projectModel) variableSitesFor(name string) []variableSite {
 		return sites
 	}
 	var sites []variableSite
-	for _, path := range sortedKeys(m.variableSites) {
+	for _, path := range slices.Sorted(maps.Keys(m.variableSites)) {
 		for _, site := range m.variableSites[path] {
 			if site.build != nil && site.varDef.MapName != "" && site.varDef.Name == name {
 				sites = append(sites, site)

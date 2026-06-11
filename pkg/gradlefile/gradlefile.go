@@ -125,12 +125,7 @@ func (b *editBuffer) add(s span, replacement string) error {
 
 // changed reports whether rendering would differ from the original content.
 func (b *editBuffer) changed() bool {
-	for _, e := range b.edits {
-		if string(b.original[e.start:e.end]) != e.replacement {
-			return true
-		}
-	}
-	return false
+	return b.changeCount() > 0
 }
 
 // changeCount returns the number of edits that modify the original content.

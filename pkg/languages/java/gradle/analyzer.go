@@ -8,8 +8,9 @@ package gradle
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/chainguard-dev/clog"
@@ -75,12 +76,12 @@ func (ga *GradleAnalyzer) AnalyzeRemote(ctx context.Context, files map[string][]
 // collectProperties surfaces catalog version keys and version variables as
 // analysis properties with their defining files.
 func collectProperties(model *projectModel, result *analyzer.AnalysisResult) {
-	for _, key := range sortedKeys(model.catalogVersionSites) {
+	for _, key := range slices.Sorted(maps.Keys(model.catalogVersionSites)) {
 		site := model.catalogVersionSites[key][0]
 		result.Properties[key] = site.version.Value
 		result.PropertySources[key] = relativeTo(model.rootDir, site.path())
 	}
-	for _, name := range sortedKeys(model.variableSites) {
+	for _, name := range slices.Sorted(maps.Keys(model.variableSites)) {
 		if _, exists := result.Properties[name]; exists {
 			continue
 		}
@@ -92,7 +93,7 @@ func collectProperties(model *projectModel, result *analyzer.AnalysisResult) {
 
 // collectCatalogDependencies records one dependency per catalog library.
 func collectCatalogDependencies(model *projectModel, result *analyzer.AnalysisResult) {
-	for _, module := range sortedKeys(model.catalogLibrarySites) {
+	for _, module := range slices.Sorted(maps.Keys(model.catalogLibrarySites)) {
 		library := model.catalogLibrarySites[module][0].library
 		info := &analyzer.DependencyInfo{
 			Name:           module,
@@ -114,7 +115,7 @@ func collectCatalogDependencies(model *projectModel, result *analyzer.AnalysisRe
 // collectDeclaredDependencies records dependencies declared directly in
 // build scripts. Catalog entries win when the same module appears in both.
 func collectDeclaredDependencies(model *projectModel, result *analyzer.AnalysisResult) {
-	for _, module := range sortedKeys(model.declarationSites) {
+	for _, module := range slices.Sorted(maps.Keys(model.declarationSites)) {
 		if _, exists := result.Dependencies[module]; exists {
 			continue
 		}
@@ -153,7 +154,7 @@ func countCatalogReferences(model *projectModel, result *analyzer.AnalysisResult
 			if decl.Kind != gradlefile.CatalogRef {
 				continue
 			}
-			module, ok := model.aliasModules[normalizeAlias(decl.CatalogAlias)]
+			module, ok := model.aliasModules[gradlefile.NormalizeAlias(decl.CatalogAlias)]
 			if !ok {
 				continue
 			}
@@ -266,16 +267,6 @@ func getAffectedDependenciesGradle(analysis *analyzer.AnalysisResult, catalogKey
 		}
 	}
 	return affected
-}
-
-// sortedKeys returns the keys of m in sorted order for deterministic output.
-func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for key := range m {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // relativeTo returns path relative to root, falling back to path itself.

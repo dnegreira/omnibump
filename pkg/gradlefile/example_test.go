@@ -218,3 +218,36 @@ func ExampleValidateCoordinate() {
 	// <nil>
 	// true
 }
+
+func ExampleBuildFile_ResolutionRules() {
+	content := []byte(`eachDependency { DependencyResolveDetails details ->
+    if (details.requested.group == "io.netty" && !details.requested.name.startsWith("netty-tcnative-")) {
+        details.useVersion(libs.versions.netty.get())
+    }
+    if (details.requested.group == 'com.signalfx.public') {
+        if (details.requested.name == 'signalfx-java') {
+            details.useVersion '1.0.49'
+        }
+    }
+}`)
+	build, _ := gradlefile.ParseBuild("build.gradle", content)
+
+	for _, rule := range build.ResolutionRules() {
+		fmt.Printf("group=%s artifact=%q catalogKey=%q version=%q\n", rule.Group, rule.Artifact, rule.CatalogKey, rule.Version)
+	}
+
+	// Literal rules are editable in place; catalog-backed rules are bumped
+	// through their [versions] key instead.
+	for _, rule := range build.ResolutionRules() {
+		if rule.Version != "" {
+			if err := build.SetResolutionRuleVersion(rule, "1.0.50"); err != nil {
+				fmt.Println(err)
+			}
+		}
+	}
+	fmt.Println("changed:", build.Changed())
+	// Output:
+	// group=io.netty artifact="" catalogKey="netty" version=""
+	// group=com.signalfx.public artifact="signalfx-java" catalogKey="" version="1.0.49"
+	// changed: true
+}

@@ -112,19 +112,21 @@ func (p *updatePlan) applyProperties(ctx context.Context) error {
 		if err := p.requireVersion("property "+name, value); err != nil {
 			return err
 		}
+		catalogSites := p.model.catalogVersionSites[name]
+		variableSites := p.model.variableSitesFor(name)
 		switch {
-		case len(p.model.catalogVersionSites[name]) > 0:
-			if len(p.model.variableSitesFor(name)) > 0 {
+		case len(catalogSites) > 0:
+			if len(variableSites) > 0 {
 				log.Warnf("Property %s matches both a catalog version key and a variable; updating the catalog key", name)
 			}
-			for _, site := range p.model.catalogVersionSites[name] {
+			for _, site := range catalogSites {
 				if err := site.set(value); err != nil {
 					return fmt.Errorf("failed to update catalog version %s in %s: %w", name, site.path(), err)
 				}
 				log.Infof("Updating catalog version %s from %s to %s in %s", name, site.version.Value, value, site.path())
 			}
-		case len(p.model.variableSitesFor(name)) > 0:
-			for _, site := range p.model.variableSitesFor(name) {
+		case len(variableSites) > 0:
+			for _, site := range variableSites {
 				if err := site.set(value); err != nil {
 					return fmt.Errorf("failed to update variable %s in %s: %w", name, site.path(), err)
 				}
@@ -177,7 +179,7 @@ func (p *updatePlan) applyDependency(ctx context.Context, dep languages.Dependen
 	}
 
 	log.Infof("Dependency %s not declared in any Gradle file: pinning via resolutionStrategy force block", module)
-	if err := p.requireVersion("forced dependency "+module, dep.Version); err != nil {
+	if err := p.requireVersion("dependency "+module, dep.Version); err != nil {
 		return err
 	}
 	p.forced[module] = dep.Version
@@ -201,28 +203,19 @@ func (p *updatePlan) applyCatalogTier(ctx context.Context, module, version strin
 			}
 			handled = handled || ok
 		case library.Version != "":
-			if err := p.requireVersion("dependency "+module, version); err != nil {
-				return false, err
-			}
+			// Settings-script catalogs only declare libraries via
+			// versionRef, so inline versions always live in a TOML catalog.
 			if site.catalog == nil {
 				continue
+			}
+			if err := p.requireVersion("dependency "+module, version); err != nil {
+				return false, err
 			}
 			if err := site.catalog.SetLibraryVersion(library, version); err != nil {
 				return false, fmt.Errorf("failed to update catalog library %s in %s: %w", library.Alias, site.path(), err)
 			}
 			log.Infof("Updating catalog library %s (%s) from %s to %s in %s",
 				library.Alias, module, library.Version, version, site.path())
-			handled = true
-		}
-
-		// Keep strictly("...") constraints that reference this library's
-		// alias consistent with the catalog bump.
-		for _, strictlySite := range p.model.strictlyAliasSites[normalizeAlias(library.Alias)] {
-			if err := strictlySite.build.SetDependencyVersion(strictlySite.decl, version); err != nil {
-				return false, fmt.Errorf("failed to update strictly constraint for %s in %s: %w",
-					module, strictlySite.build.Path(), err)
-			}
-			log.Infof("Updating strictly constraint for %s to %s in %s", module, version, strictlySite.build.Path())
 			handled = true
 		}
 	}
@@ -240,12 +233,16 @@ type editSite interface {
 // applyCatalogRef updates all definition sites of a catalog version key on
 // behalf of module, honouring explicit-property precedence.
 func (p *updatePlan) applyCatalogRef(ctx context.Context, module, key, version string) (bool, error) {
-	sites := p.model.catalogVersionSites[key]
-	editSites := make([]editSite, len(sites))
+	return p.applyKeyedSites(ctx, module, "catalog version", key, version, toEditSites(p.model.catalogVersionSites[key]))
+}
+
+// toEditSites adapts a concrete site slice to the editSite interface.
+func toEditSites[S editSite](sites []S) []editSite {
+	adapted := make([]editSite, len(sites))
 	for i, site := range sites {
-		editSites[i] = site
+		adapted[i] = site
 	}
-	return p.applyKeyedSites(ctx, module, "catalog version", key, version, editSites)
+	return adapted
 }
 
 // applyRuleTier updates the version source of dependency resolve rules that
@@ -277,17 +274,13 @@ func (p *updatePlan) applyRuleTier(ctx context.Context, module, group, artifact,
 			}
 			handled = handled || ok
 		case rule.Version != "":
-			target := "resolution rule for " + group
-			if rule.Artifact != "" {
-				target = "resolution rule for " + module
-			}
-			if err := p.requireVersion(target, version); err != nil {
+			if err := p.requireVersion("dependency "+module, version); err != nil {
 				return false, err
 			}
 			if err := site.build.SetResolutionRuleVersion(rule, version); err != nil {
-				return false, fmt.Errorf("failed to update %s in %s: %w", target, site.build.Path(), err)
+				return false, fmt.Errorf("failed to update resolution rule for %s in %s: %w", module, site.build.Path(), err)
 			}
-			log.Infof("Patching %s via %s from %s to %s in %s", module, target, rule.Version, version, site.build.Path())
+			log.Infof("Patching %s via resolution rule from %s to %s in %s", module, rule.Version, version, site.build.Path())
 			handled = true
 		}
 	}
@@ -311,12 +304,7 @@ func (p *updatePlan) applyVariableOrCatalogRef(ctx context.Context, module, varP
 // applyVariableRef updates all definition sites of a version variable on
 // behalf of module, honouring explicit-property precedence.
 func (p *updatePlan) applyVariableRef(ctx context.Context, module, varPath, version string) (bool, error) {
-	sites := p.model.variableSites[varPath]
-	editSites := make([]editSite, len(sites))
-	for i, site := range sites {
-		editSites[i] = site
-	}
-	return p.applyKeyedSites(ctx, module, "variable", varPath, version, editSites)
+	return p.applyKeyedSites(ctx, module, "variable", varPath, version, toEditSites(p.model.variableSites[varPath]))
 }
 
 // applyKeyedSites updates every definition site of a named key on behalf of
