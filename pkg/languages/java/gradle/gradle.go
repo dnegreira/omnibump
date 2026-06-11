@@ -82,9 +82,9 @@ var (
 )
 
 // skipDirs lists directories to skip when walking the file tree.
-var skipDirs = map[string]bool{
-	"vendor":       true,
-	"node_modules": true,
+var skipDirs = map[string]struct{}{
+	"vendor":       {},
+	"node_modules": {},
 }
 
 // validateVersion checks if a version string contains only safe characters.
@@ -358,7 +358,7 @@ func findBuildFiles(root string) ([]string, error) {
 		// Skip hidden directories and common non-build directories
 		if d.IsDir() {
 			name := d.Name()
-			if path != root && (name[0] == '.' || skipDirs[name]) {
+			if _, skip := skipDirs[name]; path != root && (name[0] == '.' || skip) {
 				return filepath.SkipDir
 			}
 			return nil

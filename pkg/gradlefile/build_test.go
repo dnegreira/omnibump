@@ -296,14 +296,14 @@ func TestParseBuild_CatalogRefs(t *testing.T) {
     api libs.commons.lang3
 }`
 	f := mustParseBuild(t, "build.gradle", content)
-	aliases := map[string]bool{}
+	aliases := make(map[string]struct{})
 	for _, d := range f.Dependencies() {
 		if d.Kind == CatalogRef {
-			aliases[d.CatalogAlias] = true
+			aliases[d.CatalogAlias] = struct{}{}
 		}
 	}
 	for _, want := range []string{"netty.codec", "commons.lang3"} {
-		if !aliases[want] {
+		if _, found := aliases[want]; !found {
 			t.Errorf("catalog ref %q not found, got %v", want, aliases)
 		}
 	}

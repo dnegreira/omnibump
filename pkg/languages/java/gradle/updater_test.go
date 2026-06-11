@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package gradle
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -52,10 +51,10 @@ func copyFixture(t *testing.T, fixture string) string {
 func updateAndValidate(t *testing.T, cfg *languages.UpdateConfig) {
 	t.Helper()
 	g := &Gradle{}
-	if err := g.Update(context.Background(), cfg); err != nil {
+	if err := g.Update(t.Context(), cfg); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if err := g.Validate(context.Background(), cfg); err != nil {
+	if err := g.Validate(t.Context(), cfg); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
@@ -354,7 +353,7 @@ func TestGradle_Update_PropertyPrecedence(t *testing.T) {
 	t.Run("conflicting versions", func(t *testing.T) {
 		dir := copyFixture(t, "opensearch-style")
 		g := &Gradle{}
-		err := g.Update(context.Background(), &languages.UpdateConfig{
+		err := g.Update(t.Context(), &languages.UpdateConfig{
 			RootDir: dir,
 			Dependencies: []languages.Dependency{
 				{Name: "io.netty:netty-codec", Version: "4.2.13.Final"},
@@ -373,7 +372,7 @@ func TestGradle_Update_ConflictingDependencyVersions(t *testing.T) {
 	// netty-codec and netty-handler share the "netty" version key; asking
 	// for two different versions cannot be satisfied.
 	g := &Gradle{}
-	err := g.Update(context.Background(), &languages.UpdateConfig{
+	err := g.Update(t.Context(), &languages.UpdateConfig{
 		RootDir: dir,
 		Dependencies: []languages.Dependency{
 			{Name: "io.netty:netty-codec", Version: "4.2.13.Final"},
@@ -389,7 +388,7 @@ func TestGradle_Update_PropertyNotFound(t *testing.T) {
 	dir := copyFixture(t, "opensearch-style")
 
 	g := &Gradle{}
-	err := g.Update(context.Background(), &languages.UpdateConfig{
+	err := g.Update(t.Context(), &languages.UpdateConfig{
 		RootDir:    dir,
 		Properties: map[string]string{"noSuchProperty": "1.0.0"},
 	})
@@ -406,7 +405,7 @@ func TestGradle_Update_DryRun_AllMechanisms(t *testing.T) {
 	}
 
 	g := &Gradle{}
-	err := g.Update(context.Background(), &languages.UpdateConfig{
+	err := g.Update(t.Context(), &languages.UpdateConfig{
 		RootDir: dir,
 		DryRun:  true,
 		Dependencies: []languages.Dependency{
@@ -431,7 +430,7 @@ func TestGradle_Update_MissingCoordinates(t *testing.T) {
 	dir := copyFixture(t, "opensearch-style")
 
 	g := &Gradle{}
-	err := g.Update(context.Background(), &languages.UpdateConfig{
+	err := g.Update(t.Context(), &languages.UpdateConfig{
 		RootDir: dir,
 		Dependencies: []languages.Dependency{
 			{Name: "justartifact", Version: "1.0.0"},
@@ -451,16 +450,16 @@ func TestGradle_Validate_ForceBlockSatisfiesDependency(t *testing.T) {
 		},
 	}
 	g := &Gradle{}
-	if err := g.Update(context.Background(), cfg); err != nil {
+	if err := g.Update(t.Context(), cfg); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if err := g.Validate(context.Background(), cfg); err != nil {
+	if err := g.Validate(t.Context(), cfg); err != nil {
 		t.Errorf("Validate() should accept force-block pinning, got %v", err)
 	}
 
 	// A different expected version must fail validation.
 	cfg.Dependencies[0].Version = "4.1.999.Final"
-	if err := g.Validate(context.Background(), cfg); err == nil {
+	if err := g.Validate(t.Context(), cfg); err == nil {
 		t.Error("Validate() should fail for mismatching force entry")
 	}
 }
@@ -469,7 +468,7 @@ func TestGradleAnalyzer_Analyze_ModelBacked(t *testing.T) {
 	dir := copyFixture(t, "opensearch-style")
 
 	ga := &GradleAnalyzer{}
-	result, err := ga.Analyze(context.Background(), dir)
+	result, err := ga.Analyze(t.Context(), dir)
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}

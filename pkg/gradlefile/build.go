@@ -328,11 +328,11 @@ var (
 // reservedVarNames are bare assignment names that describe the project
 // itself, not dependency versions; rerouting a bump to them would corrupt the
 // build (mirrors Maven skipping ${project.version}).
-var reservedVarNames = map[string]bool{
-	"version":          true,
-	"group":            true,
-	"description":      true,
-	"archivesBaseName": true,
+var reservedVarNames = map[string]struct{}{
+	"version":          {},
+	"group":            {},
+	"description":      {},
+	"archivesBaseName": {},
 }
 
 // scanVariables finds version-variable definitions: Groovy ext maps and flat
@@ -391,7 +391,7 @@ func (f *BuildFile) scanExtBlocks(content []byte) {
 		}
 		for _, e := range extFlatAssignPattern.FindAllSubmatchIndex(content[body.start:body.end], -1) {
 			name := string(content[body.start+e[4] : body.start+e[5]])
-			if reservedVarNames[name] {
+			if _, reserved := reservedVarNames[name]; reserved {
 				continue
 			}
 			f.addVar(VarDef{
@@ -414,7 +414,7 @@ func (f *BuildFile) scanFlatAssignments(content []byte) {
 			continue
 		}
 		name := string(content[m[4]:m[5]])
-		if reservedVarNames[name] {
+		if _, reserved := reservedVarNames[name]; reserved {
 			continue
 		}
 		f.addVar(VarDef{

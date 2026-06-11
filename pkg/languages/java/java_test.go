@@ -6,7 +6,6 @@ SPDX-License-Identifier: Apache-2.0
 package java
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -138,7 +137,7 @@ func TestDetectBuildTool(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := writeProjectFiles(t, tt.files)
 
-			tool := detectBuildTool(context.Background(), dir)
+			tool := detectBuildTool(t.Context(), dir)
 			gotTool := ""
 			if tool != nil {
 				gotTool = tool.Name()
@@ -178,7 +177,7 @@ func TestJava_Detect(t *testing.T) {
 			dir := writeProjectFiles(t, tt.files)
 
 			j := &Java{}
-			found, err := j.Detect(context.Background(), dir)
+			found, err := j.Detect(t.Context(), dir)
 			if err != nil {
 				t.Fatalf("Detect() error = %v", err)
 			}
@@ -194,7 +193,7 @@ func TestJava_GetBuildTool(t *testing.T) {
 		dir := writeProjectFiles(t, map[string]string{"build.gradle": "apply plugin: 'java'\n"})
 
 		j := &Java{}
-		tool, err := j.GetBuildTool(context.Background(), dir)
+		tool, err := j.GetBuildTool(t.Context(), dir)
 		if err != nil {
 			t.Fatalf("GetBuildTool() error = %v", err)
 		}
@@ -203,7 +202,7 @@ func TestJava_GetBuildTool(t *testing.T) {
 		}
 
 		// A second call returns the cached tool even for another directory.
-		again, err := j.GetBuildTool(context.Background(), t.TempDir())
+		again, err := j.GetBuildTool(t.Context(), t.TempDir())
 		if err != nil {
 			t.Fatalf("second GetBuildTool() error = %v", err)
 		}
@@ -214,7 +213,7 @@ func TestJava_GetBuildTool(t *testing.T) {
 
 	t.Run("errors when nothing is detected", func(t *testing.T) {
 		j := &Java{}
-		if _, err := j.GetBuildTool(context.Background(), t.TempDir()); err == nil {
+		if _, err := j.GetBuildTool(t.Context(), t.TempDir()); err == nil {
 			t.Error("GetBuildTool() should error for an empty directory")
 		}
 	})
