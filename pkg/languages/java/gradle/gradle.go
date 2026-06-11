@@ -302,6 +302,34 @@ func effectiveVersions(model *projectModel, module, artifact string) []effective
 			desc:    fmt.Sprintf("has version %s", site.decl.Version),
 		})
 	}
+	group, _, _ := strings.Cut(module, ":")
+	for _, site := range model.resolutionRuleSites[group] {
+		rule := site.rule
+		if rule.Artifact != "" && rule.Artifact != artifact {
+			continue
+		}
+		switch {
+		case rule.CatalogKey != "":
+			for _, keySite := range model.catalogVersionSites[rule.CatalogKey] {
+				versions = append(versions, effectiveVersion{
+					version: keySite.version.Value,
+					desc:    fmt.Sprintf("catalog key %s has version %s", rule.CatalogKey, keySite.version.Value),
+				})
+			}
+		case rule.VarRef != "":
+			for _, varSite := range model.variableSites[rule.VarRef] {
+				versions = append(versions, effectiveVersion{
+					version: varSite.value(),
+					desc:    fmt.Sprintf("variable %s has version %s", rule.VarRef, varSite.value()),
+				})
+			}
+		case rule.Version != "":
+			versions = append(versions, effectiveVersion{
+				version: rule.Version,
+				desc:    fmt.Sprintf("resolution rule has version %s", rule.Version),
+			})
+		}
+	}
 	for _, path := range model.sortedFiles {
 		build, ok := model.builds[path]
 		if !ok {

@@ -167,8 +167,12 @@ func (p *updatePlan) applyDependency(ctx context.Context, dep languages.Dependen
 	if err != nil {
 		return err
 	}
+	ruleHandled, err := p.applyRuleTier(ctx, module, group, artifact, dep.Version)
+	if err != nil {
+		return err
+	}
 
-	if catalogHandled || declHandled {
+	if catalogHandled || declHandled || ruleHandled {
 		return nil
 	}
 
@@ -242,6 +246,53 @@ func (p *updatePlan) applyCatalogRef(ctx context.Context, module, key, version s
 		editSites[i] = site
 	}
 	return p.applyKeyedSites(ctx, module, "catalog version", key, version, editSites)
+}
+
+// applyRuleTier updates the version source of dependency resolve rules that
+// match module: a rule reading a catalog version accessor routes to that
+// [versions] key, a rule interpolating a variable routes to the variable's
+// definition, and a rule with a literal version is edited in place. This
+// links modules to their governing version when the project pins them only
+// through resolutionStrategy.eachDependency (kafbat/kayenta pattern).
+func (p *updatePlan) applyRuleTier(ctx context.Context, module, group, artifact, version string) (bool, error) {
+	log := clog.FromContext(ctx)
+	handled := false
+
+	for _, site := range p.model.resolutionRuleSites[group] {
+		rule := site.rule
+		if rule.Artifact != "" && rule.Artifact != artifact {
+			continue
+		}
+		switch {
+		case rule.CatalogKey != "":
+			ok, err := p.applyCatalogRef(ctx, module, rule.CatalogKey, version)
+			if err != nil {
+				return false, err
+			}
+			handled = handled || ok
+		case rule.VarRef != "":
+			ok, err := p.applyVariableOrCatalogRef(ctx, module, rule.VarRef, version)
+			if err != nil {
+				return false, err
+			}
+			handled = handled || ok
+		case rule.Version != "":
+			target := "resolution rule for " + group
+			if rule.Artifact != "" {
+				target = "resolution rule for " + module
+			}
+			if err := p.requireVersion(target, version); err != nil {
+				return false, err
+			}
+			if err := site.build.SetResolutionRuleVersion(rule, version); err != nil {
+				return false, fmt.Errorf("failed to update %s in %s: %w", target, site.build.Path(), err)
+			}
+			log.Infof("Patching %s via %s from %s to %s in %s", module, target, rule.Version, version, site.build.Path())
+			handled = true
+		}
+	}
+
+	return handled, nil
 }
 
 // applyVariableOrCatalogRef routes a variable reference: definition sites
